@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Sonance
+GenericName=Sonos Controller
+Comment=Control your Sonos speakers
+Exec=sonance
+Icon=audio-speakers
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=sonos;speakers;music;spotify;bluetooth;
+StartupNotify=true
