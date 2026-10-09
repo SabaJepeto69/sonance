@@ -9,6 +9,7 @@ mod output;
 mod queue;
 mod room3d;
 mod roomtab;
+mod system;
 mod widgets;
 
 use adw::prelude::*;
@@ -55,6 +56,8 @@ pub struct App {
     pub alarms: alarms::AlarmsView,
     pub room: roomtab::RoomTab,
     pub output: output::OutputSection,
+    pub mpris: RefCell<Option<crate::mpris::Mpris>>,
+    pub events: RefCell<Option<crate::sonos::events::Events>>,
 
     pub groups: RefCell<Vec<Group>>,
     summaries: RefCell<HashMap<String, String>>,
@@ -75,24 +78,35 @@ pub struct App {
 pub fn run(core: Core) {
     let app = adw::Application::builder().application_id("dev.sonance.Sonance").build();
     let core2 = core.clone();
+    // `--background` (used by start at login) builds everything but shows no window.
+    let hidden_start = std::env::args().any(|a| a == "--background");
+    let first = Cell::new(true);
     app.connect_activate(move |gapp| {
-        if let Some(w) = gapp.active_window() {
+        // A hidden window still counts: launching again brings it back.
+        if let Some(w) = gapp.windows().into_iter().next() {
             w.present();
             return;
         }
         load_css();
         let ui = App::build(gapp, core2.clone());
-        ui.window.present();
-        if let Ok(connector) = std::env::var("SONANCE_MONITOR") {
-            open_on_monitor(&ui.window, &connector);
+        if !(hidden_start && first.replace(false)) {
+            ui.window.present();
+            if let Ok(connector) = std::env::var("SONANCE_MONITOR") {
+                open_on_monitor(&ui.window, &connector);
+            }
         }
         ui.start();
         // Every callback holds a Weak<App>; this is the one strong reference.
         let keep = RefCell::new(Some(ui.clone()));
-        ui.window.connect_close_request(move |_| {
-            // Put the PC's sound back on its normal output and stop every helper process.
+        ui.window.connect_close_request(move |win| {
+            let quit = keep.borrow().as_ref().is_some_and(|a| a.core.cfg.lock().unwrap().quit_on_close);
+            if !quit {
+                // Carry on in the background; media keys and the PC output keep working.
+                win.set_visible(false);
+                return glib::Propagation::Stop;
+            }
             if let Some(app) = keep.borrow_mut().take() {
-                crate::rt().block_on(app.core.audio.shutdown());
+                app.quit();
             }
             glib::Propagation::Proceed
         });
@@ -208,6 +222,8 @@ impl App {
             alarms,
             room,
             output,
+            mpris: RefCell::default(),
+            events: RefCell::default(),
             groups: RefCell::default(),
             summaries: RefCell::default(),
             selected: RefCell::default(),
@@ -270,15 +286,18 @@ impl App {
         app.connect_alarms();
         app.connect_room();
         app.connect_output();
+        app.connect_system();
         app
     }
 
     fn main_menu(self: &Rc<Self>) -> gtk::Popover {
-        let items: [(&str, fn(&Rc<App>)); 4] = [
+        let items: [(&str, fn(&Rc<App>)); 6] = [
             ("Group rooms…", |a| a.show_group_dialog()),
             ("Room settings…", |a| a.show_room_settings()),
             ("Spotify account…", |a| a.show_spotify_dialog()),
+            ("Preferences…", |a| a.show_preferences()),
             ("About Sonance", |a| a.show_about()),
+            ("Quit Sonance", |a| a.quit()),
         ];
         let pop = gtk::Popover::new();
         let bx = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -439,8 +458,15 @@ impl App {
             let Some(app) = w.upgrade() else { return glib::ControlFlow::Break };
             let t = app.tick.get() + 1;
             app.tick.set(t);
-            app.poll_status();
-            if t % 5 == 0 {
+            // With speakers calling back, a slow safety poll is enough and the
+            // clock moves locally; without them, ask every second.
+            let live = app.live();
+            if !live || t % 15 == 0 {
+                app.poll_status();
+            } else {
+                app.advance_position();
+            }
+            if t % (if live { 30 } else { 5 }) == 0 {
                 app.refresh_topology();
                 app.refresh_sleep_timer();
                 if app.stack.visible_child_name().as_deref() == Some("now") {
@@ -614,6 +640,7 @@ impl App {
         }
         // Which speakers count as "playing" in the room view follows the selected group.
         self.recompute_plan();
+        self.resubscribe();
         self.refresh_sleep_timer();
     }
 
@@ -681,6 +708,7 @@ impl App {
                     let cover_stale = track_changed || s.from_queue != old.from_queue || s.shuffle() != old.shuffle() || s.art != old.art;
                     *app.status.borrow_mut() = s;
                     app.player.update(&app);
+                    app.mpris_sync();
                     if track_changed {
                         app.queue.highlight(app.status.borrow().track_no);
                     }

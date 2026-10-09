@@ -12,20 +12,28 @@ use anyhow::{Context, Result, bail};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
 
-use super::{Engine, dsp, pw};
+use super::{Engine, dsp, eq, pw};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Measurement {
     pub latency_ms: f32,
     /// dBFS RMS of the direct sound.
     pub level_db: f32,
     /// Peak-to-noise of the correlation, 0..1-ish.
     pub confidence: f32,
+    /// Response in the octave bands of [`eq::BANDS_HZ`], relative to the 500 Hz–2 kHz mean;
+    /// NaN where the band was lost in noise.
+    pub bands_db: Vec<f32>,
 }
 
 const RATE: u32 = 48_000;
 const PAD_MS: u32 = 100;
 const MIN_CONFIDENCE: f32 = 0.4;
+/// The sweep spans every EQ band with room to spare at both ends; 1.5 s keeps it short to sit
+/// through while giving the bass enough energy to clear room noise.
+const SWEEP_S: f32 = 1.5;
+const SWEEP_HZ: (f32, f32) = (40.0, 16_000.0);
+const SWEEP_DB: f32 = -12.0;
 
 fn ms(n: u32) -> usize {
     (n as u64 * RATE as u64 / 1000) as usize
@@ -90,9 +98,6 @@ impl Engine {
             .collect())
     }
 
-    /// Plays a 1 s exponential sweep (100 Hz–10 kHz, -12 dBFS) into `sink` while recording `mic`,
-    /// and returns how long after reaching the sink it was heard, and how loud.
-    /// `mic` may also be a sink, in which case its monitor is recorded (handy for testing).
     /// Plays quiet pink noise into `sink` for `secs`. A Sonos speaker only
     /// switches to its Bluetooth input once it hears real sound, ~2.5 s after
     /// it starts, so a test sweep sent cold is never played; this wakes it.
@@ -107,6 +112,9 @@ impl Engine {
         Ok(())
     }
 
+    /// Plays a 1.5 s exponential sweep (40 Hz–16 kHz, -12 dBFS) into `sink` while recording `mic`,
+    /// and returns how long after reaching the sink it was heard, how loud, and its frequency response.
+    /// `mic` may also be a sink, in which case its monitor is recorded (handy for testing).
     pub async fn measure(&self, sink: &str, mic: &str, max_latency_ms: u32) -> Result<Measurement> {
         self.reap_stale().await;
         let _one_at_a_time = self.inner.measuring.lock().await;
@@ -153,7 +161,7 @@ impl Engine {
             bail!("microphone {mic} isn't delivering audio");
         }
 
-        let sweep = dsp::sweep(RATE, 1.0, 100.0, 10_000.0, -12.0, 0.01);
+        let sweep = dsp::sweep(RATE, SWEEP_S, SWEEP_HZ.0, SWEEP_HZ.1, SWEEP_DB, 0.01);
         let mut signal = vec![0f32; ms(PAD_MS)];
         signal.extend_from_slice(&sweep);
         signal.extend(std::iter::repeat_n(0.0, ms(200)));
@@ -177,7 +185,7 @@ impl Engine {
             let _ = stdin.write_all(&bytes).await;
         });
 
-        let budget = Duration::from_millis((PAD_MS + 1200 + max_latency_ms + 3000) as u64);
+        let budget = Duration::from_millis((PAD_MS + (SWEEP_S * 1000.0) as u32 + 200 + max_latency_ms + 3000) as u64);
         let heard_all = wait_frames(&mut prog_rx, need, budget).await;
         let _ = tokio::time::timeout(Duration::from_secs(2), play.wait()).await;
         let _ = play.kill().await;
@@ -210,7 +218,8 @@ impl Engine {
         if confidence < MIN_CONFIDENCE || level_db < -90.0 {
             bail!("couldn't hear the test tone (confidence {confidence:.2}, level {level_db:.0} dBFS)");
         }
-        Ok(Measurement { latency_ms: (peak.lag - t0) / RATE as f32 * 1000.0, level_db, confidence })
+        let bands_db = eq::relative_to_mid(&dsp::band_response(&mic_ch, start, &sweep, RATE, &eq::BANDS_HZ));
+        Ok(Measurement { latency_ms: (peak.lag - t0) / RATE as f32 * 1000.0, level_db, confidence, bands_db })
     }
 }
 

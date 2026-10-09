@@ -1,5 +1,6 @@
 pub mod didl;
 pub mod discovery;
+pub mod events;
 pub mod soap;
 pub mod xml;
 
@@ -300,6 +301,9 @@ impl Sonos {
             ..Default::default()
         };
         let media_uri = mi.as_ref().ok().and_then(|m| tag(m, "CurrentURI")).unwrap_or_default();
+        if s.duration > 0 {
+            s.position = s.position.min(s.duration);
+        }
         s.from_queue = media_uri.starts_with("x-rincon-queue:");
         if !s.from_queue {
             s.track_no = 0;

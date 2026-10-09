@@ -18,6 +18,7 @@ pub struct RoomTab {
     pub view: Rc<Room3d>,
     pub layout: Rc<RefCell<Layout>>,
     tuned: adw::SwitchRow,
+    eq_strength: adw::SpinRow,
     spots: gtk::ListBox,
     add_spot: gtk::Button,
     selected: gtk::Box,
@@ -56,8 +57,12 @@ impl RoomTab {
         hint.set_can_target(false);
 
         let tuned = adw::SwitchRow::builder().title("Tune for listening spot").subtitle("Off plays your regular sound").build();
+        let eq_strength = adw::SpinRow::with_range(0.0, 100.0, 10.0);
+        eq_strength.set_title("Room EQ strength (%)");
+        eq_strength.set_subtitle("How hard measured peaks and dips are corrected");
         let tuned_list = widgets::boxed_list();
         tuned_list.append(&tuned);
+        tuned_list.append(&eq_strength);
         let calibrate = gtk::Button::builder().label("Calibrate with microphone…").css_classes(["pill"]).margin_top(4).build();
 
         let spots = widgets::boxed_list();
@@ -108,6 +113,7 @@ impl RoomTab {
             view,
             layout,
             tuned,
+            eq_strength,
             spots,
             add_spot,
             selected,
@@ -131,6 +137,7 @@ impl App {
         {
             let l = t.layout.borrow();
             t.tuned.set_active(l.tuned);
+            t.eq_strength.set_value((l.eq_strength() * 100.0) as f64);
             t.size[0].set_value(l.room.width as f64);
             t.size[1].set_value(l.room.depth as f64);
             t.size[2].set_value(l.room.height as f64);
@@ -156,6 +163,15 @@ impl App {
                 return;
             }
             app.set_tuned(row.is_active());
+        });
+        let w = Rc::downgrade(self);
+        t.eq_strength.connect_notify_local(Some("value"), move |r, _| {
+            let Some(app) = w.upgrade() else { return };
+            if app.room.syncing.get() {
+                return;
+            }
+            app.room.layout.borrow_mut().eq_strength_pct = Some(r.value() as u8);
+            app.room_changed();
         });
         let w = Rc::downgrade(self);
         t.add_spot.connect_clicked(move |_| {
@@ -334,6 +350,13 @@ impl App {
             }
             if let Some(b) = plan.bass_steps.get(&key).filter(|b| **b != 0) {
                 bits.push(format!("bass {b:+}"));
+            }
+            if let Some(t) = plan.treble_steps.get(&key).filter(|t| **t != 0) {
+                bits.push(format!("treble {t:+}"));
+            }
+            if let Some(eq) = plan.eq.get(&key).filter(|e| e.iter().any(|g| g.abs() >= 0.5)) {
+                let (lo, hi) = eq.iter().fold((0f32, 0f32), |(lo, hi), g| (lo.min(*g), hi.max(*g)));
+                bits.push(format!("room EQ {lo:.0}…{hi:+.0} dB"));
             }
             if sp.turn.abs() >= 10.0 {
                 bits.push(format!("turn {:.0}° {}", sp.turn.abs(), if sp.turn > 0.0 { "right" } else { "left" }));
@@ -566,6 +589,7 @@ impl App {
                         for (uuid, ip) in rooms {
                             if let Ok(eq) = sonos.eq(&ip).await {
                                 b.bass.insert(uuid.clone(), eq.bass);
+                                b.treble.insert(uuid.clone(), eq.treble);
                             }
                             if let (Ok(lf), Ok(rf)) = (sonos.channel_volume(&ip, "LF").await, sonos.channel_volume(&ip, "RF").await) {
                                 b.balance.insert(uuid, (lf, rf));
@@ -600,24 +624,31 @@ impl App {
             let Some(spot) = l.active() else { return };
             (plan::compute(&l, spot, |s| live.contains(&s.id)), l.baseline.clone().unwrap_or_default())
         };
-        let mut jobs: Vec<(String, String, i32, i32, Option<(u8, u8)>)> = Vec::new();
+        // Over Bluetooth a measured room gets the precise EQ on its delay line,
+        // so its Sonos bass/treble stay put rather than correcting twice.
+        let bt = self.bt_mode();
+        let mut jobs: Vec<(String, i32, i32, i32, Option<(u8, u8)>)> = Vec::new();
         for (room, steps) in &plan.volume_steps {
             let Some(ip) = self.room_ip(room) else { continue };
             let before = baseline.applied.get(room).copied().unwrap_or(0);
-            let bass = baseline.bass.get(room).copied().unwrap_or(0) + plan.bass_steps.get(room).copied().unwrap_or(0);
-            jobs.push((room.clone(), ip, *steps - before, bass, plan.balance.get(room).copied()));
+            let skip_tone = bt && plan.eq.contains_key(room);
+            let tone = |m: &HashMap<String, i32>| if skip_tone { 0 } else { m.get(room).copied().unwrap_or(0) };
+            let bass = baseline.bass.get(room).copied().unwrap_or(0) + tone(&plan.bass_steps);
+            let treble = baseline.treble.get(room).copied().unwrap_or(0) + tone(&plan.treble_steps);
+            jobs.push((ip, *steps - before, bass, treble, plan.balance.get(room).copied()));
         }
         let sonos = self.core.sonos.clone();
         let w = Rc::downgrade(self);
         let steps: HashMap<String, i32> = plan.volume_steps.clone();
         spawn(
             async move {
-                for (_, ip, delta, bass, balance) in &jobs {
+                for (ip, delta, bass, treble, balance) in &jobs {
                     if *delta != 0 {
                         let v = sonos.volume(ip).await? as i32;
                         sonos.set_volume(ip, (v + delta).clamp(0, 100) as u8).await?;
                     }
                     sonos.set_bass(ip, (*bass).clamp(-10, 10)).await?;
+                    sonos.set_treble(ip, (*treble).clamp(-10, 10)).await?;
                     if let Some((lf, rf)) = balance {
                         sonos.set_channel_volume(ip, "LF", *lf).await?;
                         sonos.set_channel_volume(ip, "RF", *rf).await?;
@@ -644,23 +675,26 @@ impl App {
     fn restore_regular(self: &Rc<Self>) {
         let Some(b) = self.room.layout.borrow_mut().baseline.take() else { return };
         let mut jobs = Vec::new();
-        let mut rooms: Vec<&String> = b.applied.keys().chain(b.bass.keys()).chain(b.balance.keys()).collect();
+        let mut rooms: Vec<&String> = b.applied.keys().chain(b.bass.keys()).chain(b.treble.keys()).chain(b.balance.keys()).collect();
         rooms.sort();
         rooms.dedup();
         for room in rooms {
             if let Some(ip) = self.room_ip(room) {
-                jobs.push((ip, b.applied.get(room).copied().unwrap_or(0), b.bass.get(room).copied(), b.balance.get(room).copied()));
+                jobs.push((ip, b.applied.get(room).copied().unwrap_or(0), b.bass.get(room).copied(), b.treble.get(room).copied(), b.balance.get(room).copied()));
             }
         }
         let sonos = self.core.sonos.clone();
         self.act(async move {
-            for (ip, applied, bass, balance) in jobs {
+            for (ip, applied, bass, treble, balance) in jobs {
                 if applied != 0 {
                     let v = sonos.volume(&ip).await? as i32;
                     sonos.set_volume(&ip, (v - applied).clamp(0, 100) as u8).await?;
                 }
                 if let Some(bass) = bass {
                     sonos.set_bass(&ip, bass).await?;
+                }
+                if let Some(treble) = treble {
+                    sonos.set_treble(&ip, treble).await?;
                 }
                 if let Some((lf, rf)) = balance {
                     sonos.set_channel_volume(&ip, "LF", lf).await?;

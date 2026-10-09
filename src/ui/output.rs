@@ -231,13 +231,13 @@ impl App {
                         anyhow::anyhow!("{} isn't paired with this PC yet. Hold its Bluetooth button, then use “Add Bluetooth speaker…”.", m.name)
                     })?;
                     let sink = audio.bt_connect(&dev.mac).await?;
-                    let (delay_ms, gain_db) = routes_plan.get(&m.uuid).copied().unwrap_or((0.0, 0.0));
-                    routes.push(Route { sink, delay_ms, gain_db });
+                    let (delay_ms, gain_db, eq_db) = routes_plan.get(&m.uuid).cloned().unwrap_or_default();
+                    routes.push(Route { sink, delay_ms, gain_db, eq_db });
                 }
                 for mac in &bt_macs {
                     let sink = audio.bt_connect(mac).await?;
-                    let (delay_ms, gain_db) = routes_plan.get(mac).copied().unwrap_or((0.0, 0.0));
-                    routes.push(Route { sink, delay_ms, gain_db });
+                    let (delay_ms, gain_db, eq_db) = routes_plan.get(mac).cloned().unwrap_or_default();
+                    routes.push(Route { sink, delay_ms, gain_db, eq_db });
                 }
                 audio.set_routes(&routes).await?;
                 Ok(format!("Playing this PC's sound on {} speakers over Bluetooth", routes.len()))
@@ -266,14 +266,14 @@ impl App {
         let mut routes = Vec::new();
         for m in &rooms {
             if let Some(sink) = sonos_bt(&m.uuid, &devices).and_then(|d| d.sink.clone()) {
-                let (delay_ms, gain_db) = targets.get(&m.uuid).copied().unwrap_or((0.0, 0.0));
-                routes.push(Route { sink, delay_ms, gain_db });
+                let (delay_ms, gain_db, eq_db) = targets.get(&m.uuid).cloned().unwrap_or_default();
+                routes.push(Route { sink, delay_ms, gain_db, eq_db });
             }
         }
         for mac in &macs {
             if let Some(sink) = devices.iter().find(|d| d.mac.eq_ignore_ascii_case(mac)).and_then(|d| d.sink.clone()) {
-                let (delay_ms, gain_db) = targets.get(mac).copied().unwrap_or((0.0, 0.0));
-                routes.push(Route { sink, delay_ms, gain_db });
+                let (delay_ms, gain_db, eq_db) = targets.get(mac).cloned().unwrap_or_default();
+                routes.push(Route { sink, delay_ms, gain_db, eq_db });
             }
         }
         if routes.is_empty() {
@@ -289,11 +289,20 @@ impl App {
 
     /// Delay and gain per route. Delays always apply, since lining speakers
     /// up is what keeps them in sync; gains only when tuning is on.
-    fn route_targets(&self) -> std::collections::HashMap<String, (f32, f32)> {
+    /// Delay, gain and EQ per route. Delays always apply, since lining
+    /// speakers up is what keeps them in sync; level and room EQ only when
+    /// tuning is on. Every route is lowered by the largest EQ boost, so
+    /// boosts can't clip and the routes stay level with each other.
+    fn route_targets(&self) -> std::collections::HashMap<String, (f32, f32, Vec<f32>)> {
         let tuned = self.room.layout.borrow().tuned;
-        self.current_plan()
-            .map(|p| p.bt_routes.into_iter().map(|(k, (d, g))| (k, (d, if tuned { g } else { 0.0 }))).collect())
-            .unwrap_or_default()
+        let Some(p) = self.current_plan() else { return Default::default() };
+        p.bt_routes
+            .iter()
+            .map(|(k, (d, g))| {
+                let t = if tuned { (*d, g - p.headroom_db, p.eq.get(k).cloned().unwrap_or_default()) } else { (*d, 0.0, Vec::new()) };
+                (k.clone(), t)
+            })
+            .collect()
     }
 
     /// Scan for and pair Bluetooth speakers, Sonos ones included.

@@ -5,6 +5,7 @@
 
 mod bluetooth;
 mod dsp;
+mod eq;
 #[cfg(test)]
 mod live_tests;
 mod measure;
@@ -19,6 +20,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, OnceCell};
 
 pub use bluetooth::BtDevice;
+pub use eq::{BANDS_HZ, DB_PER_SONOS_STEP, correction, sonos_tone};
 pub use measure::Measurement;
 pub use routing::Route;
 pub use wifi::{StreamUrls, lan_ip};

@@ -160,6 +160,16 @@ impl App {
                             }
                         }
                     }
+                    // Measure the speaker itself, not the user's tone settings: they're
+                    // put back afterwards and tuning adds its correction on top.
+                    let mut restore_tone = None;
+                    if let Some((_, ip)) = &job.room {
+                        if let Ok(eq) = sonos.eq(ip).await {
+                            restore_tone = Some((ip.clone(), eq.bass, eq.treble));
+                            let _ = sonos.set_bass(ip, 0).await;
+                            let _ = sonos.set_treble(ip, 0).await;
+                        }
+                    }
                     let at_volume = match &job.room {
                         Some((_, ip)) => sonos.volume(ip).await.unwrap_or(0),
                         None => 0,
@@ -168,13 +178,17 @@ impl App {
                         let _ = audio.wake(&job.sink, 3.0).await;
                     }
                     let m = audio.measure(&job.sink, &mic, max_ms).await;
+                    if let Some((ip, bass, treble)) = restore_tone {
+                        let _ = sonos.set_bass(&ip, bass).await;
+                        let _ = sonos.set_treble(&ip, treble).await;
+                    }
                     for (_, ip, v) in restore_vol {
                         let _ = sonos.set_volume(&ip, v).await;
                     }
                     if let Some((ip, ch, v)) = restore_ch {
                         let _ = sonos.set_channel_volume(&ip, ch, v).await;
                     }
-                    out.push((job.id.clone(), m.map(|m| Measured { latency_ms: m.latency_ms, level_db: m.level_db, at_volume })));
+                    out.push((job.id.clone(), m.map(|m| Measured { latency_ms: m.latency_ms, level_db: m.level_db, at_volume, bands_db: m.bands_db })));
                 }
                 out
             },

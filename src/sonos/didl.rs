@@ -29,12 +29,14 @@ const NS: &str = r#"xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:
 
 /// "H:MM:SS" -> seconds; anything unparsable (NOT_IMPLEMENTED, "") is 0.
 pub fn parse_time(s: &str) -> u32 {
-    let mut total = 0u32;
+    let mut total = 0u64;
     for part in s.split(':') {
-        let Ok(n) = part.split('.').next().unwrap_or("").parse::<u32>() else { return 0 };
-        total = total * 60 + n;
+        let Ok(n) = part.split('.').next().unwrap_or("").parse::<u64>() else { return 0 };
+        total = total.saturating_mul(60).saturating_add(n);
     }
-    total
+    // A Sonos Move (firmware 94.1) reports positions offset by 2^32 seconds,
+    // e.g. 1193046:29:03 for 47 s in; wrapping recovers the real value.
+    (total % (1u64 << 32)) as u32
 }
 
 pub fn fmt_time(secs: u32) -> String {
@@ -95,6 +97,7 @@ mod tests {
         assert_eq!(parse_time("0:03:21"), 201);
         assert_eq!(parse_time("1:00:00.000"), 3600);
         assert_eq!(parse_time("NOT_IMPLEMENTED"), 0);
+        assert_eq!(parse_time("1193046:29:03"), 47);
         assert_eq!(fmt_time(201), "3:21");
         assert_eq!(hms(3725), "01:02:05");
     }

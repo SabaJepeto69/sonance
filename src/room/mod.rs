@@ -93,13 +93,16 @@ pub struct Spot {
     pub measured: HashMap<String, Measured>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Measured {
     /// Time from handing audio to the output until it reached the mic.
     pub latency_ms: f32,
     /// Level at the spot (dBFS at the mic) with the speaker at `at_volume`.
     pub level_db: f32,
     pub at_volume: u8,
+    /// Response at the spot in octave bands (audio::BANDS_HZ), relative to the mids.
+    #[serde(default)]
+    pub bands_db: Vec<f32>,
 }
 
 /// What tuning changed, so "regular" can undo exactly that. Volume is kept
@@ -109,6 +112,8 @@ pub struct Measured {
 pub struct Baseline {
     /// Room uuid → bass before tuning.
     pub bass: HashMap<String, i32>,
+    /// Room uuid → treble before tuning.
+    pub treble: HashMap<String, i32>,
     /// Room uuid → (LF, RF) channel volumes of a stereo pair before tuning.
     pub balance: HashMap<String, (u8, u8)>,
     /// Room uuid → volume steps tuning has currently added.
@@ -125,6 +130,8 @@ pub struct Layout {
     /// The toggle: tune for the active spot, or play "regular".
     pub tuned: bool,
     pub baseline: Option<Baseline>,
+    /// How hard room EQ corrects, 0–100 %; unset means the default.
+    pub eq_strength_pct: Option<u8>,
 }
 
 fn path() -> PathBuf {
@@ -147,6 +154,10 @@ impl Layout {
                 let _ = std::fs::rename(tmp, p);
             }
         }
+    }
+
+    pub fn eq_strength(&self) -> f32 {
+        self.eq_strength_pct.unwrap_or(70) as f32 / 100.0
     }
 
     pub fn active(&self) -> Option<&Spot> {

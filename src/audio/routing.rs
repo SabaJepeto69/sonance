@@ -14,11 +14,13 @@
 //! repeated per chunk to follow clock drift, big changes jump with a short
 //! fade, and the player is fed silence rather than starved, so the Bluetooth
 //! link never stops.
+//!
+//! A route may also carry a room-correction EQ, applied on the way out.
 
 use std::collections::{HashSet, VecDeque};
 use std::os::fd::AsRawFd;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
@@ -26,6 +28,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Child;
 use tokio::task::JoinHandle;
 
+use super::eq::Equalizer;
 use super::{Engine, SINK, pw};
 
 const RATE: usize = 48_000;
@@ -41,18 +44,23 @@ const FADE: usize = 128;
 /// on every route, so the differences between speakers stay exact.
 const FLOOR_MS: f32 = 40.0;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Route {
     /// PipeWire node name of the target sink.
     pub sink: String,
     pub delay_ms: f32,
     pub gain_db: f32,
+    /// Gain per band of [`super::BANDS_HZ`]; empty is flat.
+    pub eq_db: Vec<f32>,
 }
 
 /// Shared between the control side (set_routes) and the pump tasks.
 struct Ctl {
     target_frames: AtomicI64,
     gain: AtomicU32,
+    eq_db: Mutex<Vec<f32>>,
+    /// Bumped on every EQ change, so the writer only takes the lock when there's news.
+    eq_version: AtomicU64,
     /// Last observed ring fill, in frames, for diagnostics and tests.
     fill: AtomicI64,
 }
@@ -60,6 +68,7 @@ struct Ctl {
 pub(super) struct Active {
     delay_ms: f32,
     gain_db: f32,
+    eq_db: Vec<f32>,
     ctl: Arc<Ctl>,
     rec: Child,
     play: Child,
@@ -147,6 +156,8 @@ async fn start(route: &Route) -> Result<Active> {
     let ctl = Arc::new(Ctl {
         target_frames: AtomicI64::new(target_for(route.delay_ms)),
         gain: AtomicU32::new(gain_lin(route.gain_db).to_bits()),
+        eq_db: Mutex::new(route.eq_db.clone()),
+        eq_version: AtomicU64::new(0),
         fill: AtomicI64::new(0),
     });
     let ring: Arc<Mutex<VecDeque<[f32; 2]>>> = Arc::new(Mutex::new(VecDeque::with_capacity(RATE * 4)));
@@ -166,7 +177,7 @@ async fn start(route: &Route) -> Result<Active> {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    Ok(Active { delay_ms: route.delay_ms, gain_db: route.gain_db, ctl, rec, play, tasks })
+    Ok(Active { delay_ms: route.delay_ms, gain_db: route.gain_db, eq_db: route.eq_db.clone(), ctl, rec, play, tasks })
 }
 
 async fn read_side(mut rx: tokio::process::ChildStdout, ring: Arc<Mutex<VecDeque<[f32; 2]>>>) {
@@ -226,7 +237,14 @@ async fn write_side(mut tx: tokio::process::ChildStdin, ring: Arc<Mutex<VecDeque
     let mut bytes = Vec::with_capacity((CHUNK + 1) * 8);
     let mut gain = f32::from_bits(ctl.gain.load(Ordering::Relaxed));
     let mut fade_in = 0usize;
+    let mut eq = Equalizer::new(RATE as u32);
+    let mut eq_seen = None;
     loop {
+        let v = ctl.eq_version.load(Ordering::Acquire);
+        if eq_seen != Some(v) {
+            eq_seen = Some(v);
+            eq.set(&ctl.eq_db.lock().unwrap());
+        }
         out.clear();
         {
             let mut r = ring.lock().unwrap();
@@ -260,6 +278,9 @@ async fn write_side(mut tx: tokio::process::ChildStdin, ring: Arc<Mutex<VecDeque
         }
         // Silence keeps the Bluetooth link streaming while the ring fills.
         out.resize(CHUNK, [0.0, 0.0]);
+        if !eq.is_flat() {
+            eq.process(&mut out);
+        }
 
         let want = f32::from_bits(ctl.gain.load(Ordering::Relaxed));
         bytes.clear();
@@ -280,7 +301,7 @@ async fn write_side(mut tx: tokio::process::ChildStdin, ring: Arc<Mutex<VecDeque
 }
 
 impl Engine {
-    /// Reconciles the running delay lines with `routes`. Delay and gain changes
+    /// Reconciles the running delay lines with `routes`. Delay, gain and EQ changes
     /// apply live without interrupting the stream; only new or vanished routes
     /// start or stop.
     pub async fn set_routes(&self, routes: &[Route]) -> Result<()> {
@@ -300,6 +321,11 @@ impl Engine {
                     a.ctl.gain.store(gain_lin(route.gain_db).to_bits(), Ordering::Relaxed);
                     a.delay_ms = route.delay_ms;
                     a.gain_db = route.gain_db;
+                    if a.eq_db != route.eq_db {
+                        *a.ctl.eq_db.lock().unwrap() = route.eq_db.clone();
+                        a.ctl.eq_version.fetch_add(1, Ordering::Release);
+                        a.eq_db = route.eq_db.clone();
+                    }
                     continue;
                 }
                 st.routes.remove(&route.sink);

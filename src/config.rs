@@ -22,6 +22,8 @@ pub struct Config {
     pub pc_output: bool,
     /// MACs of non-Sonos Bluetooth speakers switched on for the PC output.
     pub bt_speakers: Vec<String>,
+    /// Closing the window quits, instead of carrying on in the background.
+    pub quit_on_close: bool,
 }
 
 fn path() -> PathBuf {

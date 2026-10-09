@@ -33,6 +33,8 @@ pub struct SpeakerPlan {
     pub measured: bool,
     /// When its sound arrives at the spot, flight time plus device latency.
     pub arrival_ms: f32,
+    /// Measured octave-band response at the spot, if calibrated.
+    pub bands: Option<Vec<f32>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -42,8 +44,16 @@ pub struct Plan {
     pub volume_steps: HashMap<String, i32>,
     /// Sonos room uuid → (LF, RF) channel volumes for a stereo pair.
     pub balance: HashMap<String, (u8, u8)>,
-    /// Sonos room uuid → bass steps to add to the baseline (≤ 0).
+    /// Sonos room uuid → bass steps to add to the baseline: from the measured
+    /// response when calibrated, else from nearby walls.
     pub bass_steps: HashMap<String, i32>,
+    /// Sonos room uuid → treble steps to add to the baseline (measured only).
+    pub treble_steps: HashMap<String, i32>,
+    /// Route key → room-EQ band gains (dB), from measurements.
+    pub eq: HashMap<String, Vec<f32>>,
+    /// Largest EQ boost anywhere; Bluetooth routes are all lowered by this
+    /// much so boosts can't clip, and their relative levels stay intact.
+    pub headroom_db: f32,
     /// Route key (Sonos room uuid or Bluetooth MAC) → (delay ms, gain dB) when
     /// everything plays over Bluetooth.
     pub bt_routes: HashMap<String, (f32, f32)>,
@@ -95,6 +105,7 @@ pub fn speaker_plan(layout: &Layout, s: &Speaker, spot: &Spot) -> SpeakerPlan {
     let walls = [s.pos[0], r.width - s.pos[0], s.pos[2], r.depth - s.pos[2]].iter().filter(|d| **d < WALL_NEAR).count() as u8;
 
     let flight = distance / SPEED_OF_SOUND * 1000.0;
+    let bands = spot.measured.get(&s.id).map(|m| m.bands_db.clone()).filter(|b| b.len() == crate::audio::BANDS_HZ.len());
     let (level_db, arrival_ms, measured) = match spot.measured.get(&s.id) {
         Some(m) => (m.level_db, m.latency_ms, true),
         None => (
@@ -103,14 +114,15 @@ pub fn speaker_plan(layout: &Layout, s: &Speaker, spot: &Spot) -> SpeakerPlan {
             false,
         ),
     };
-    SpeakerPlan { id: s.id.clone(), name: s.name.clone(), distance, off_axis, turn, walls, level_db, measured, arrival_ms }
+    SpeakerPlan { id: s.id.clone(), name: s.name.clone(), distance, off_axis, turn, walls, level_db, measured, arrival_ms, bands }
 }
 
 /// `include` picks the speakers currently playing (the selected group plus
 /// any Bluetooth speakers switched on).
 pub fn compute(layout: &Layout, spot: &Spot, include: impl Fn(&Speaker) -> bool) -> Plan {
     let speakers: Vec<&Speaker> = layout.speakers.iter().filter(|s| include(s)).collect();
-    let plans: Vec<SpeakerPlan> = speakers.iter().map(|s| speaker_plan(layout, s, spot)).collect();
+    let mut plans: Vec<SpeakerPlan> = speakers.iter().map(|s| speaker_plan(layout, s, spot)).collect();
+    remove_mic_colour(&mut plans);
     let mut plan = Plan::default();
     if plans.is_empty() {
         return plan;
@@ -126,12 +138,28 @@ pub fn compute(layout: &Layout, spot: &Spot, include: impl Fn(&Speaker) -> bool)
 
     for (key, members) in &groups {
         let cut = quietest - group_level[key];
+        // Room EQ from what the mic heard: both halves of a pair power-averaged.
+        let measured: Vec<&Vec<f32>> = members.iter().filter_map(|(_, p)| p.bands.as_ref()).collect();
+        let correction = (!measured.is_empty()).then(|| crate::audio::correction(&average_bands(&measured), layout.eq_strength()));
+        if let Some(c) = &correction {
+            plan.eq.insert(key.clone(), c.clone());
+        }
         match &members[0].0.kind {
             Kind::Sonos { .. } => {
                 plan.volume_steps.insert(key.clone(), (cut / DB_PER_STEP).round() as i32);
-                // Bass: each nearby wall adds ~3 dB of boundary gain; Sonos bass steps are ~1.5 dB.
-                let walls = members.iter().map(|(_, p)| p.walls as f32).sum::<f32>() / members.len() as f32;
-                plan.bass_steps.insert(key.clone(), -(walls * 3.0 / 1.5).round().clamp(0.0, 6.0) as i32);
+                match &correction {
+                    // Sonos only has bass and treble; the measured curve is mapped onto those.
+                    Some(c) => {
+                        let (bass, treble) = crate::audio::sonos_tone(c);
+                        plan.bass_steps.insert(key.clone(), bass);
+                        plan.treble_steps.insert(key.clone(), treble);
+                    }
+                    None => {
+                        // Each nearby wall adds ~3 dB of boundary gain; Sonos bass steps are ~1.5 dB.
+                        let walls = members.iter().map(|(_, p)| p.walls as f32).sum::<f32>() / members.len() as f32;
+                        plan.bass_steps.insert(key.clone(), -(walls * 3.0 / 1.5).round().clamp(0.0, 6.0) as i32);
+                    }
+                }
                 let side = |ch: &str| members.iter().find(|(s, _)| matches!(&s.kind, Kind::Sonos { channel: Some(c), .. } if c == ch)).map(|(_, p)| p.level_db);
                 if let (Some(lf), Some(rf)) = (side("LF"), side("RF")) {
                     // Turn the louder half down; channel volume is linear in amplitude.
@@ -157,8 +185,48 @@ pub fn compute(layout: &Layout, spot: &Spot, include: impl Fn(&Speaker) -> bool)
         let gain = plan.bt_routes.get(key).map(|r| r.1).unwrap_or(0.0);
         plan.bt_routes.insert(key.clone(), (delay, gain));
     }
+    plan.headroom_db = plan.eq.values().flatten().cloned().fold(0.0, f32::max);
     plan.speakers = plans;
     plan
+}
+
+/// Bands at or above this index (4 kHz) are treated as mic-coloured when every
+/// speaker shows the same deviation there.
+const MIC_BANDS_FROM: usize = 6;
+
+/// Webcam and laptop mics are far from flat in the treble: on a test system
+/// three different speakers all measured +6 to +9 dB at 4–8 kHz, which is the
+/// mic, not the speakers. What every speaker at a spot has in common up there
+/// is taken out. Bass is left alone, since room modes really do differ from
+/// one speaker position to the next.
+fn remove_mic_colour(plans: &mut [SpeakerPlan]) {
+    let measured: Vec<usize> = plans.iter().enumerate().filter(|(_, p)| p.bands.is_some()).map(|(i, _)| i).collect();
+    if measured.len() < 2 {
+        return;
+    }
+    for band in MIC_BANDS_FROM..crate::audio::BANDS_HZ.len() {
+        let mut vals: Vec<f32> = measured.iter().filter_map(|&i| plans[i].bands.as_ref()?.get(band).copied()).filter(|v| v.is_finite()).collect();
+        if vals.len() < 2 {
+            continue;
+        }
+        vals.sort_by(f32::total_cmp);
+        let common = vals[vals.len() / 2];
+        for &i in &measured {
+            if let Some(v) = plans[i].bands.as_mut().and_then(|b| b.get_mut(band)) {
+                *v -= common;
+            }
+        }
+    }
+}
+
+/// Power-averages octave responses, skipping bands a measurement couldn't hear.
+fn average_bands(bands: &[&Vec<f32>]) -> Vec<f32> {
+    (0..crate::audio::BANDS_HZ.len())
+        .map(|i| {
+            let vals: Vec<f32> = bands.iter().filter_map(|b| b.get(i).copied()).filter(|v| v.is_finite()).collect();
+            if vals.is_empty() { f32::NAN } else { 10.0 * (vals.iter().map(|v| 10f32.powf(v / 10.0)).sum::<f32>() / vals.len() as f32).log10() }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -202,6 +270,31 @@ mod tests {
         let sp = speaker_plan(&l, &s, &spot([2.0, 1.0, 1.0]));
         assert!((sp.turn - 90.0).abs() < 0.5, "{}", sp.turn);
         assert!((sp.off_axis - 90.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn mic_colour_is_shared_treble() {
+        // Real measurements (webcam mic): all three speakers read +6..9 dB at 4–8 kHz.
+        let real = [
+            [15.2, 7.4, 7.1, 0.4, -0.6, 0.2, 6.0, 6.0],
+            [3.0, -5.4, -1.3, -3.4, 1.6, 1.7, 9.2, 8.6],
+            [-0.1, 1.0, -1.3, -0.2, 0.5, -0.3, 6.1, 5.7],
+        ];
+        let l = Layout::default();
+        let mut plans: Vec<SpeakerPlan> = real
+            .iter()
+            .map(|b| {
+                let mut p = speaker_plan(&l, &sonos("x", "a", None, [1.0, 1.0, 1.0], 0.0), &spot([2.0, 1.0, 2.0]));
+                p.bands = Some(b.to_vec());
+                p
+            })
+            .collect();
+        remove_mic_colour(&mut plans);
+        let b = |i: usize| plans[i].bands.clone().unwrap();
+        // The shared treble rise is gone; only the left Era stays brighter than the rest.
+        assert!(b(0)[6].abs() < 0.2 && b(2)[6].abs() < 0.2 && (b(1)[6] - 3.1).abs() < 0.01);
+        // Bass, where positions genuinely differ, is untouched.
+        assert_eq!(b(0)[0], 15.2);
     }
 
     #[test]

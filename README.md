@@ -16,6 +16,15 @@ account, no cloud, no official app needed.
   through the Spotify account linked in your Sonos system, so the Sonos queue
   stays in charge.
 - **Alarms and sleep timer.**
+- **Media keys and desktop controls.** Sonance publishes MPRIS, so keyboard
+  media keys, GNOME's top-bar media controls and the lock screen control your
+  Sonos.
+- **Live updates.** Speakers notify Sonance the moment something changes,
+  including changes made from your phone, instead of being asked every
+  second.
+- **Runs in the background.** Closing the window keeps media keys and the PC
+  sound output working; **Quit Sonance** in the menu really quits. It can
+  also start at login, hidden (Preferences).
 - **Speaker settings.** Bass, treble, loudness, night sound and speech
   enhancement (home-theatre models), status light and button lock.
 - **3D Room tab.** Place your speakers and one or more listening spots in a
@@ -23,6 +32,13 @@ account, no cloud, no official app needed.
   the left/right balance of stereo pairs, a bass trim for speakers near walls,
   and which way to turn each speaker. A switch applies it or plays "regular";
   switching off undoes exactly what tuning changed.
+- **Automatic room EQ.** Calibration also measures each speaker's frequency
+  response at your spot. Over Bluetooth, an 8-band EQ on each speaker's
+  delay line corrects it; Sonos over Wi-Fi only has bass and treble, so the
+  correction is mapped onto those. It mainly cuts peaks and boosts gently
+  (+3 dB at most), with an adjustable strength. Webcam and laptop mics are
+  coloured in the treble, so a treble rise shared by every speaker is treated
+  as the mic and ignored. A measurement mic gives the best results.
 - **Microphone calibration.** Plays a test sweep from each speaker in turn and
   measures, with any mic placed at your spot, its real delay and loudness
   there. Those measurements replace the model's estimates.
@@ -70,12 +86,18 @@ Or just build and run it: `cargo run --release`.
 
 ### Firewall
 
-Speakers on Wi-Fi fetch the PC's sound from Sonance on **TCP port 8899**. If
-you run a firewall, allow it from your LAN only (adjust the subnet to yours):
+Speakers connect back to this PC on two TCP ports:
+
+- **8899**: they fetch the PC's sound from here ("Play this PC's sound").
+- **8900**: live updates. Without it Sonance still works, but asks the
+  speakers every second instead.
+
+If you run a firewall, allow them from your LAN only (adjust the subnet to
+yours):
 
 ```sh
-sudo ufw allow from 192.168.1.0/24 to any port 8899 proto tcp      # ufw
-sudo firewall-cmd --add-port=8899/tcp --permanent && sudo firewall-cmd --reload   # firewalld
+sudo ufw allow from 192.168.1.0/24 to any port 8899:8900 proto tcp      # ufw
+sudo firewall-cmd --add-port=8899-8900/tcp --permanent && sudo firewall-cmd --reload   # firewalld
 ```
 
 Spotify sign-in uses a local callback on `127.0.0.1:8898`, which needs no rule.
@@ -127,6 +149,8 @@ sound**, put a microphone (a webcam's works) at the spot, and press
 
 - `sonance --probe` prints a read-only dump of what Sonance sees on the
   network: speakers, groups, queue, favorites, alarms.
+- `sonance --background` starts with no window (used by start at login).
+  Launching Sonance again brings the window back.
 - `SONANCE_MONITOR=HDMI-1 sonance` opens the window on that monitor. Wayland
   gives apps no placement control, so it briefly goes fullscreen there.
 

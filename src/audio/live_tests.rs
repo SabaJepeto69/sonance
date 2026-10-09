@@ -42,7 +42,7 @@ async fn live_routes_and_measure() {
         println!("no route: {err:#}");
         assert!(err.to_string().contains("couldn't hear"));
 
-        let route = |delay_ms, gain_db| [Route { sink: TEST_SINK.into(), delay_ms, gain_db }];
+        let route = |delay_ms, gain_db| [Route { sink: TEST_SINK.into(), delay_ms, gain_db, ..Default::default() }];
         e.set_routes(&route(0.0, 0.0)).await.unwrap();
         let base = e.measure("sonance", TEST_SINK, 2000).await.unwrap();
         println!("delay 0: {base:?}");
@@ -62,6 +62,35 @@ async fn live_routes_and_measure() {
         e.set_routes(&[]).await.unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(pw::find_node("sonance-route-sonance_test-out").await.unwrap().is_none());
+    })
+    .await;
+}
+
+/// The sweep's band response through a route, flat and then with a live EQ change.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn live_eq_bands() {
+    with_test_sink(|e| async move {
+        let route = |eq_db: Vec<f32>| [Route { sink: TEST_SINK.into(), delay_ms: 100.0, eq_db, ..Default::default() }];
+        e.set_routes(&route(Vec::new())).await.unwrap();
+        let flat = e.measure("sonance", TEST_SINK, 2000).await.unwrap();
+        println!("flat: {:?}", flat.bands_db);
+        assert!(flat.bands_db.iter().all(|v| v.abs() < 0.5));
+
+        let pid = e.inner.state.lock().await.routes[TEST_SINK].child_id();
+        let eq = vec![3.0, -6.0, 0.0, 0.0, 0.0, 0.0, 2.0, -8.0];
+        e.set_routes(&route(eq.clone())).await.unwrap();
+        assert_eq!(e.inner.state.lock().await.routes[TEST_SINK].child_id(), pid, "EQ change must not restart");
+        let m = e.measure("sonance", TEST_SINK, 2000).await.unwrap();
+        println!("eq {eq:?}: {:?}", m.bands_db);
+        // Octave averages blur the filters' peaks, so only the shape is checked.
+        assert!(m.bands_db[0] > 1.0 && m.bands_db[1] < -3.0 && m.bands_db[6] > 0.5 && m.bands_db[7] < -4.0);
+        assert!(m.bands_db[3..6].iter().all(|v| v.abs() < 1.0));
+
+        e.set_routes(&route(Vec::new())).await.unwrap();
+        let back = e.measure("sonance", TEST_SINK, 2000).await.unwrap();
+        println!("flat again: {:?}", back.bands_db);
+        assert!(back.bands_db.iter().all(|v| v.abs() < 0.5));
     })
     .await;
 }

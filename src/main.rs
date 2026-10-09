@@ -1,5 +1,6 @@
 mod audio;
 mod config;
+mod mpris;
 mod room;
 mod sonos;
 mod spotify;
