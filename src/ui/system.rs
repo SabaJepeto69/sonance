@@ -1,4 +1,4 @@
-//! Desktop integration: MPRIS (media keys, GNOME's media controls), live
+//! Desktop integration: the top-bar island's D-Bus controls, live
 //! events from the speakers, running in the background, and start at login.
 
 use adw::prelude::*;
@@ -38,7 +38,7 @@ fn set_autostart(on: bool) -> std::io::Result<()> {
 
 impl App {
     pub(super) fn connect_system(self: &Rc<Self>) {
-        // MPRIS: commands arrive on a channel and are handled on the GTK thread.
+        // Island controls: commands arrive on a channel and are handled on the GTK thread.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Cmd>();
         let w = Rc::downgrade(self);
         spawn(async move { Mpris::start(tx).await }, move |r| {
@@ -48,7 +48,7 @@ impl App {
                     *app.mpris.borrow_mut() = Some(m);
                     app.mpris_sync();
                 }
-                Err(e) => eprintln!("media controls unavailable: {e:#}"),
+                Err(e) => eprintln!("top-bar controls unavailable: {e:#}"),
             }
         });
         let w = Rc::downgrade(self);
@@ -133,7 +133,7 @@ impl App {
         self.mpris_sync();
     }
 
-    /// Publishes the current state to MPRIS.
+    /// Publishes the current state to the island.
     pub(super) fn mpris_sync(&self) {
         let Some(m) = self.mpris.borrow().clone() else { return };
         let s = self.status.borrow().clone();
@@ -143,6 +143,7 @@ impl App {
             title: s.title.clone(),
             artist: s.artist.clone(),
             album: s.album.clone(),
+            room: self.group().map(|g| g.name()).unwrap_or_default(),
             art: s.art.clone(),
             track_no: s.track_no,
             length_us: s.duration as i64 * 1_000_000,
@@ -228,7 +229,7 @@ impl App {
         let list = widgets::boxed_list();
         let bg = adw::SwitchRow::builder()
             .title("Keep running when closed")
-            .subtitle("Media keys, top-bar controls and the PC sound output keep working")
+            .subtitle("The top-bar island and the PC sound output keep working")
             .active(!self.core.cfg.lock().unwrap().quit_on_close)
             .build();
         let login = adw::SwitchRow::builder().title("Start when you log in").subtitle("Starts quietly in the background").active(autostart_file().exists()).build();

@@ -16,13 +16,15 @@ account, no cloud, no official app needed.
   through the Spotify account linked in your Sonos system, so the Sonos queue
   stays in charge.
 - **Alarms and sleep timer.**
-- **Media keys and desktop controls.** Sonance publishes MPRIS, so keyboard
-  media keys, GNOME's top-bar media controls and the lock screen control your
-  Sonos.
+- **Top-bar island (GNOME).** A Dynamic Island in the middle of the top bar:
+  a small black pill with the cover and title that springs open on hover into
+  the song, a seek bar, previous/play/next and the group volume. Clicking the
+  cover opens Sonance. Keyboard media keys are deliberately left alone: they
+  keep controlling whatever else plays on the PC.
 - **Live updates.** Speakers notify Sonance the moment something changes,
   including changes made from your phone, instead of being asked every
   second.
-- **Runs in the background.** Closing the window keeps media keys and the PC
+- **Runs in the background.** Closing the window keeps the island and the PC
   sound output working; **Quit Sonance** in the menu really quits. It can
   also start at login, hidden (Preferences).
 - **Speaker settings.** Bass, treble, loudness, night sound and speech
@@ -79,6 +81,7 @@ sudo apt install cargo libgtk-4-dev libadwaita-1-dev pipewire-bin pipewire-pulse
 git clone https://github.com/SabaJepeto69/sonance
 cd sonance
 ./install.sh            # builds and installs to ~/.local, adds an app-menu entry
+                        # and, on GNOME, the top-bar island extension
 ./install.sh uninstall  # removes it
 ```
 
@@ -165,6 +168,9 @@ sound**, put a microphone (a webcam's works) at the spot, and press
 - `src/audio/`: the PipeWire `sonance` output, the Wi-Fi WAV stream,
   Bluetooth through BlueZ's D-Bus API, Sonance's own delay lines, and
   sweep-based measurement.
+- `src/mpris.rs` and `extension/`: Sonance's controls on D-Bus (MPRIS
+  interfaces under the private name `dev.sonance.Sonance.Controls`) and the
+  GNOME Shell extension that draws the island from them.
 - `src/ui/`: the GTK interface, including the Cairo-drawn 3D room and the
   "liquid glass" menus.
 

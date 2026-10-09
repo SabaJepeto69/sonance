@@ -101,7 +101,7 @@ pub fn run(core: Core) {
         ui.window.connect_close_request(move |win| {
             let quit = keep.borrow().as_ref().is_some_and(|a| a.core.cfg.lock().unwrap().quit_on_close);
             if !quit {
-                // Carry on in the background; media keys and the PC output keep working.
+                // Carry on in the background; the top-bar island and the PC output keep working.
                 win.set_visible(false);
                 return glib::Propagation::Stop;
             }

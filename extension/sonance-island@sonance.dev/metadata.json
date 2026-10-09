@@ -1,0 +1,7 @@
+{
+  "uuid": "sonance-island@sonance.dev",
+  "name": "Sonance Island",
+  "description": "A Dynamic Island in the top bar for Sonance: hover it for the song, playback controls and volume.",
+  "shell-version": ["47", "48", "49", "50"],
+  "url": "https://github.com/SabaJepeto69/sonance"
+}

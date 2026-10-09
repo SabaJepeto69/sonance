@@ -1,0 +1,122 @@
+.sonance-island {
+    background-color: #000;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+    color: #fff;
+}
+
+.sonance-island-compact {
+    padding: 0 10px 0 4px;
+    spacing: 8px;
+}
+
+.sonance-island-compact-art {
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    background-size: cover;
+    background-color: #1c1c1e;
+}
+
+.sonance-island-compact-title {
+    font-size: 9.5pt;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.85);
+}
+
+.sonance-island-bars {
+    spacing: 2px;
+}
+
+.sonance-island-bar {
+    width: 3px;
+    height: 14px;
+    border-radius: 2px;
+    background-color: #30d158;
+}
+
+.sonance-island-expanded {
+    padding: 16px 22px 14px 22px;
+    spacing: 10px;
+}
+
+.sonance-island-art {
+    width: 64px;
+    height: 64px;
+    border-radius: 14px;
+    background-size: cover;
+    background-color: #1c1c1e;
+}
+
+.sonance-island-art:hover {
+    border: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+.sonance-island-info {
+    spacing: 1px;
+    padding-left: 12px;
+}
+
+.sonance-island-title {
+    font-size: 12.5pt;
+    font-weight: 700;
+}
+
+.sonance-island-artist {
+    font-size: 10.5pt;
+    color: rgba(255, 255, 255, 0.6);
+}
+
+.sonance-island-room {
+    font-size: 9pt;
+    font-weight: 600;
+    color: #30d158;
+}
+
+.sonance-island-time {
+    font-size: 8.5pt;
+    font-feature-settings: "tnum";
+    color: rgba(255, 255, 255, 0.5);
+    min-width: 34px;
+}
+
+.sonance-island .slider {
+    -barlevel-height: 5px;
+    -barlevel-background-color: rgba(255, 255, 255, 0.18);
+    -barlevel-active-background-color: #fff;
+    -barlevel-border-width: 0;
+    -slider-handle-radius: 0;
+    -slider-handle-border-width: 0;
+    height: 16px;
+}
+
+.sonance-island .slider:hover {
+    -barlevel-height: 7px;
+    -slider-handle-radius: 6px;
+}
+
+.sonance-island-controls {
+    spacing: 28px;
+}
+
+.sonance-island-button {
+    padding: 6px;
+    border-radius: 99px;
+    color: #fff;
+}
+
+.sonance-island-button:hover {
+    background-color: rgba(255, 255, 255, 0.12);
+}
+
+.sonance-island-button:active {
+    background-color: rgba(255, 255, 255, 0.22);
+}
+
+.sonance-island-button:insensitive {
+    color: rgba(255, 255, 255, 0.3);
+}
+
+.sonance-island-volume-icon {
+    color: rgba(255, 255, 255, 0.6);
+}

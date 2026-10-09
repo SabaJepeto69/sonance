@@ -1,6 +1,11 @@
-//! MPRIS: the D-Bus interface desktop shells use for "what's playing".
-//! Publishing it gives Sonance media keys, GNOME's top-bar media controls and
-//! lock-screen controls, which keep working with the window closed.
+//! Sonance's controls on D-Bus, for the top-bar island (the `sonance-island`
+//! GNOME Shell extension in `extension/`), which keeps working with the window
+//! closed.
+//!
+//! The interfaces are MPRIS's, but the bus name deliberately isn't under
+//! `org.mpris.MediaPlayer2.`: GNOME binds keyboard media keys and its own
+//! media controls to every name there, and Sonance should not take over the
+//! media keys. Only the island looks for [`BUS_NAME`].
 //!
 //! The D-Bus side only reads a shared snapshot and forwards commands; the
 //! GTK side owns all real state and acts on the commands.
@@ -14,6 +19,7 @@ use zbus::object_server::SignalEmitter;
 use zbus::zvariant::{ObjectPath, OwnedValue, Value};
 
 const PATH: &str = "/org/mpris/MediaPlayer2";
+pub const BUS_NAME: &str = "dev.sonance.Sonance.Controls";
 
 #[derive(Debug, Clone)]
 pub enum Cmd {
@@ -43,6 +49,8 @@ pub struct State {
     pub title: String,
     pub artist: String,
     pub album: String,
+    /// The room or group playing, e.g. "Bedroom + 1".
+    pub room: String,
     pub art: Option<String>,
     pub track_no: u32,
     pub length_us: i64,
@@ -208,6 +216,9 @@ impl Player {
         if !s.album.is_empty() {
             put("xesam:album", Value::from(s.album.clone()));
         }
+        if !s.room.is_empty() {
+            put("sonance:room", Value::from(s.room.clone()));
+        }
         if let Some(art) = s.art {
             put("mpris:artUrl", Value::from(art));
         }
@@ -267,11 +278,11 @@ pub struct Mpris {
 }
 
 impl Mpris {
-    /// Claims `org.mpris.MediaPlayer2.sonance` and serves the two interfaces.
+    /// Claims [`BUS_NAME`] and serves the two interfaces.
     pub async fn start(tx: UnboundedSender<Cmd>) -> Result<Self> {
         let state: Shared = Arc::default();
         let conn = zbus::connection::Builder::session()?
-            .name("org.mpris.MediaPlayer2.sonance")?
+            .name(BUS_NAME)?
             .serve_at(PATH, Root { tx: tx.clone() })?
             .serve_at(PATH, Player { tx, state: state.clone() })?
             .build()
@@ -291,7 +302,7 @@ impl Mpris {
         if (old.playing, old.paused) != (new.playing, new.paused) {
             p.playback_status_changed(em).await?;
         }
-        if (&old.title, &old.artist, &old.album, &old.art, old.length_us, old.track_no) != (&new.title, &new.artist, &new.album, &new.art, new.length_us, new.track_no) {
+        if (&old.title, &old.artist, &old.album, &old.room, &old.art, old.length_us, old.track_no) != (&new.title, &new.artist, &new.album, &new.room, &new.art, new.length_us, new.track_no) {
             p.metadata_changed(em).await?;
             p.can_seek_changed(em).await?;
         }

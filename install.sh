@@ -5,9 +5,13 @@
 set -e
 BIN="$HOME/.local/bin"
 APPS="$HOME/.local/share/applications"
+EXT_UUID="sonance-island@sonance.dev"
+EXT="$HOME/.local/share/gnome-shell/extensions/$EXT_UUID"
 
 if [ "$1" = "uninstall" ]; then
     rm -f "$BIN/sonance" "$APPS/dev.sonance.Sonance.desktop"
+    command -v gnome-extensions >/dev/null && gnome-extensions disable "$EXT_UUID" 2>/dev/null || true
+    rm -rf "$EXT"
     echo "Sonance removed. Settings are kept in ~/.config/sonance (delete it to reset)."
     exit 0
 fi
@@ -29,3 +33,19 @@ install -Dm644 /tmp/dev.sonance.Sonance.desktop "$APPS/dev.sonance.Sonance.deskt
 rm -f /tmp/dev.sonance.Sonance.desktop
 command -v update-desktop-database >/dev/null && update-desktop-database "$APPS" 2>/dev/null || true
 echo "Installed: $BIN/sonance (and an app-menu entry)."
+
+# The top-bar island, on GNOME only.
+if command -v gnome-shell >/dev/null 2>&1; then
+    mkdir -p "$EXT"
+    cp extension/$EXT_UUID/* "$EXT/"
+    if ! gnome-extensions enable "$EXT_UUID" 2>/dev/null; then
+        # A brand-new extension is only seen after logging in again (Wayland).
+        cur=$(gsettings get org.gnome.shell enabled-extensions)
+        case "$cur" in
+            *"$EXT_UUID"*) ;;
+            "@as []") gsettings set org.gnome.shell enabled-extensions "['$EXT_UUID']" ;;
+            *) gsettings set org.gnome.shell enabled-extensions "${cur%]}, '$EXT_UUID']" ;;
+        esac
+        echo "Top-bar island installed: log out and back in to see it."
+    fi
+fi
