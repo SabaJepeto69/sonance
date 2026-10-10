@@ -40,6 +40,8 @@ pub enum Cmd {
     Shuffle(bool),
     /// "None", "Track" or "Playlist".
     Loop(String),
+    /// The island's notice was clicked; the action named in [`Mpris::notice`].
+    Action(String),
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -271,6 +273,27 @@ impl Player {
     }
 }
 
+/// What only the island uses: the current lyric line and pop-up notices.
+struct Island {
+    tx: UnboundedSender<Cmd>,
+    lyric: Arc<Mutex<String>>,
+}
+
+#[zbus::interface(name = "dev.sonance.Sonance.Island")]
+impl Island {
+    fn activate(&self, action: String) {
+        let _ = self.tx.send(Cmd::Action(action));
+    }
+    #[zbus(property)]
+    fn lyric(&self) -> String {
+        self.lyric.lock().unwrap().clone()
+    }
+    /// `kind` picks the icon ("alarm", "sleep", "spotify"); `action`, if not
+    /// empty, is sent back through `Activate` when the notice is clicked.
+    #[zbus(signal)]
+    async fn notice(emitter: &SignalEmitter<'_>, kind: &str, title: &str, body: &str, action: &str) -> zbus::Result<()>;
+}
+
 #[derive(Clone)]
 pub struct Mpris {
     conn: zbus::Connection,
@@ -284,10 +307,32 @@ impl Mpris {
         let conn = zbus::connection::Builder::session()?
             .name(BUS_NAME)?
             .serve_at(PATH, Root { tx: tx.clone() })?
-            .serve_at(PATH, Player { tx, state: state.clone() })?
+            .serve_at(PATH, Player { tx: tx.clone(), state: state.clone() })?
+            .serve_at(PATH, Island { tx, lyric: Arc::default() })?
             .build()
             .await?;
         Ok(Self { conn, state })
+    }
+
+    pub async fn set_lyric(&self, line: &str) -> Result<()> {
+        let iface = self.conn.object_server().interface::<_, Island>(PATH).await?;
+        {
+            let i = iface.get().await;
+            let mut cur = i.lyric.lock().unwrap();
+            if *cur == line {
+                return Ok(());
+            }
+            *cur = line.to_string();
+        }
+        iface.get().await.lyric_changed(iface.signal_emitter()).await?;
+        Ok(())
+    }
+
+    /// Pops the island open briefly with a message.
+    pub async fn notice(&self, kind: &str, title: &str, body: &str, action: &str) -> Result<()> {
+        let iface = self.conn.object_server().interface::<_, Island>(PATH).await?;
+        Island::notice(iface.signal_emitter(), kind, title, body, action).await?;
+        Ok(())
     }
 
     /// Stores a new snapshot and tells listeners what changed.

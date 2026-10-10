@@ -1,6 +1,9 @@
 mod audio;
 mod config;
+mod local_spotify;
+mod lyrics;
 mod mpris;
+mod phone;
 mod room;
 mod sonos;
 mod spotify;

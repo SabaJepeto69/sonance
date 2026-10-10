@@ -151,6 +151,9 @@ inline-view-switcher, .inline-switcher {
   color: rgba(255, 255, 255, 0.62);
 }
 .now-album { color: rgba(255, 255, 255, 0.38); }
+.lyrics .lyric { font-size: 15pt; font-weight: 600; color: rgba(255, 255, 255, 0.28); }
+.lyrics .lyric-current { font-size: 21pt; font-weight: 800; color: #fff; }
+button.handoff { color: #1ed760; }
 
 .thumb { border-radius: 8px; }
 

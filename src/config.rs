@@ -24,6 +24,8 @@ pub struct Config {
     pub bt_speakers: Vec<String>,
     /// Closing the window quits, instead of carrying on in the background.
     pub quit_on_close: bool,
+    /// The lyrics under Now Playing are switched off.
+    pub hide_lyrics: bool,
 }
 
 fn path() -> PathBuf {

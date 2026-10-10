@@ -36,6 +36,12 @@ pub struct Player {
     now_artist: gtk::Label,
     now_album: gtk::Label,
     art_url: RefCell<Option<String>>,
+    /// The line before the current one, the current one, the next.
+    pub lyrics_box: gtk::Box,
+    pub lyric_lines: Vec<gtk::Label>,
+    pub lyrics_btn: gtk::ToggleButton,
+    /// Shown while the Spotify app on this PC is playing.
+    pub handoff: gtk::Button,
 }
 
 fn label(classes: &[&str], xalign: f32) -> gtk::Label {
@@ -108,7 +114,17 @@ impl Player {
         volume.set_tooltip_text(Some("Group volume"));
         let sleep_pop = gtk::Popover::new();
         let sleep = gtk::MenuButton::builder().icon_name("weather-clear-night-symbolic").tooltip_text("Sleep timer").css_classes(["flat"]).valign(gtk::Align::Center).popover(&sleep_pop).build();
+        let lyrics_btn = gtk::ToggleButton::builder().icon_name("media-view-subtitles-symbolic").tooltip_text("Lyrics").css_classes(["flat"]).valign(gtk::Align::Center).build();
+        let handoff = gtk::Button::builder()
+            .icon_name("send-to-symbolic")
+            .tooltip_text("Play this PC's Spotify on the speakers")
+            .css_classes(["flat", "handoff"])
+            .valign(gtk::Align::Center)
+            .visible(false)
+            .build();
         let end = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        end.append(&handoff);
+        end.append(&lyrics_btn);
         end.append(&mute);
         end.append(&volume);
         end.append(&sleep);
@@ -133,6 +149,18 @@ impl Player {
         info.append(&now_title);
         info.append(&now_artist);
         info.append(&now_album);
+        let lyrics_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        lyrics_box.add_css_class("lyrics");
+        lyrics_box.set_margin_top(22);
+        lyrics_box.set_visible(false);
+        let lyric_lines: Vec<gtk::Label> = (0..3)
+            .map(|i| {
+                let l = gtk::Label::builder().wrap(true).justify(gtk::Justification::Center).css_classes([if i == 1 { "lyric-current" } else { "lyric" }]).build();
+                lyrics_box.append(&l);
+                l
+            })
+            .collect();
+        info.append(&lyrics_box);
         let clamp = adw::Clamp::builder().maximum_size(640).child(&info).margin_top(18).margin_bottom(130).margin_start(16).margin_end(16).build();
         let col = gtk::Box::new(gtk::Orientation::Vertical, 0);
         col.append(&cover.root);
@@ -167,6 +195,10 @@ impl Player {
             now_artist,
             now_album,
             art_url: RefCell::default(),
+            lyrics_box,
+            lyric_lines,
+            lyrics_btn,
+            handoff,
         }
     }
 
@@ -530,6 +562,7 @@ impl App {
             if let (Some(app), Ok(secs)) = (w.upgrade(), r) {
                 if app.selected.borrow().as_deref() == Some(uuid.as_str()) {
                     app.player.set_sleep_remaining(secs);
+                    app.sleep_notice(secs);
                 }
             }
         });

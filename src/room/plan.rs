@@ -92,6 +92,13 @@ fn power_sum(levels: &[f32]) -> f32 {
     10.0 * levels.iter().map(|l| 10f32.powf(l / 10.0)).sum::<f32>().max(1e-9).log10()
 }
 
+/// When sound from `s` would reach `spot` going by the model alone: flight
+/// time, plus a typical Bluetooth delay.
+pub fn model_arrival_ms(s: &Speaker, spot: &Spot) -> f32 {
+    let distance = len(sub(spot.pos, s.pos)).max(0.2);
+    distance / SPEED_OF_SOUND * 1000.0 + if s.is_bluetooth() { BT_LATENCY_GUESS_MS } else { 0.0 }
+}
+
 pub fn speaker_plan(layout: &Layout, s: &Speaker, spot: &Spot) -> SpeakerPlan {
     let to = sub(spot.pos, s.pos);
     let distance = len(to).max(0.2);

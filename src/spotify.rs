@@ -21,7 +21,9 @@ pub const REDIRECT_PORT: u16 = 8898;
 pub fn redirect_uri() -> String {
     format!("http://127.0.0.1:{REDIRECT_PORT}/callback")
 }
-const SCOPES: &str = "user-library-read playlist-read-private playlist-read-collaborative user-read-private";
+/// `user-read-playback-state` lets "play this PC's Spotify on the speakers" bring the
+/// playlist or album along, not just the song; older sign-ins lack it and get the song only.
+const SCOPES: &str = "user-library-read playlist-read-private playlist-read-collaborative user-read-private user-read-playback-state";
 
 #[derive(Clone, Debug)]
 pub struct SpItem {
@@ -252,6 +254,41 @@ impl Spotify {
     pub async fn my_playlists(&self) -> Result<Vec<SpItem>> {
         let v = self.get("/me/playlists", &[("limit", "50")]).await?;
         Ok(v["items"].as_array().map(|a| a.iter().filter_map(parse_item).collect()).unwrap_or_default())
+    }
+
+    /// The album or playlist the account is playing from, if any.
+    pub async fn playing_context(&self) -> Result<Option<String>> {
+        let v = self.get("/me/player", &[]).await?;
+        let uri = v["context"]["uri"].as_str().unwrap_or("");
+        Ok(["spotify:album:", "spotify:playlist:"].iter().any(|p| uri.starts_with(p)).then(|| uri.to_string()))
+    }
+
+    /// 0-based position of `track` in an album or playlist.
+    pub async fn index_in(&self, context: &str, track: &str) -> Result<Option<u32>> {
+        let mut parts = context.split(':').skip(1);
+        let (kind, id) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+        let (path, page) = match kind {
+            "album" => (format!("/albums/{id}/tracks"), 50),
+            "playlist" => (format!("/playlists/{id}/items"), 100),
+            _ => return Ok(None),
+        };
+        let mut offset = 0u32;
+        while offset < 5000 {
+            let v = self.get(&path, &[("limit", &page.to_string()), ("offset", &offset.to_string())]).await?;
+            let items = v["items"].as_array().cloned().unwrap_or_default();
+            for (i, it) in items.iter().enumerate() {
+                // Album tracks are the items; playlist entries wrap them (as "item", formerly "track").
+                let uri = it["uri"].as_str().or(it["item"]["uri"].as_str()).or(it["track"]["uri"].as_str());
+                if uri == Some(track) {
+                    return Ok(Some(offset + i as u32));
+                }
+            }
+            if items.len() < page || v["next"].is_null() {
+                break;
+            }
+            offset += page as u32;
+        }
+        Ok(None)
     }
 
     pub async fn my_albums(&self) -> Result<Vec<SpItem>> {

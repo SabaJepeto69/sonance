@@ -1,7 +1,11 @@
 // Sonance Island: a Dynamic Island in the middle of the top bar for Sonance.
-// Collapsed it is a small black pill (cover, title, level bars); hovering it
-// springs it open into the song, a seek bar, the transport buttons and the
-// group volume.
+//
+// Collapsed it is a small black pill (cover, title, level bars): click it to
+// play or pause, scroll on it for volume. Resting the pointer on it springs it
+// open into the song, the current lyric, a seek bar, the transport buttons and
+// the group volume. It also pops open briefly by itself: a new song, a volume
+// change made elsewhere, alarms, the sleep timer, and Spotify playing on this
+// PC (click that one to move it to the speakers).
 //
 // Sonance publishes its controls with the MPRIS interfaces but under its own
 // bus name, so GNOME's media keys and media controls leave it alone; this
@@ -23,14 +27,28 @@ import * as Slider from 'resource:///org/gnome/shell/ui/slider.js';
 const BUS_NAME = 'dev.sonance.Sonance.Controls';
 const PATH = '/org/mpris/MediaPlayer2';
 
-const COMPACT_WIDTH = 230;
-const EXPANDED_WIDTH = 440;
-const EXPANDED_HEIGHT = 206;
+const SIZES = {
+    compact: {width: 230},
+    volume: {width: 300},
+    peek: {width: 400, height: 64},
+    expanded: {width: 440},
+};
 const OPEN_MS = 420;
 const CLOSE_MS = 300;
+// Resting this long on the pill opens it, so a quick click can play/pause.
+const OPEN_DELAY_MS = 200;
 const CLOSE_DELAY_MS = 220;
+const PEEK_MS = 3500;
+const VOLUME_PEEK_MS = 1500;
 // Volume changes go to the speakers at most this often while dragging.
 const VOLUME_EVERY_MS = 120;
+const SCROLL_STEP = 0.02;
+
+const KIND_ICONS = {
+    alarm: 'alarm-symbolic',
+    sleep: 'weather-clear-night-symbolic',
+    spotify: 'send-to-symbolic',
+};
 
 const PlayerIface = `
 <node>
@@ -56,6 +74,23 @@ const PlayerIface = `
 </node>`;
 const PlayerProxy = Gio.DBusProxy.makeProxyWrapper(PlayerIface);
 
+const IslandIface = `
+<node>
+  <interface name="dev.sonance.Sonance.Island">
+    <method name="Activate">
+      <arg type="s" direction="in"/>
+    </method>
+    <signal name="Notice">
+      <arg type="s"/>
+      <arg type="s"/>
+      <arg type="s"/>
+      <arg type="s"/>
+    </signal>
+    <property name="Lyric" type="s" access="read"/>
+  </interface>
+</node>`;
+const IslandProxy = Gio.DBusProxy.makeProxyWrapper(IslandIface);
+
 function clock(us) {
     const s = Math.max(0, Math.floor(us / 1e6));
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
@@ -63,6 +98,11 @@ function clock(us) {
 
 function cssUrl(path) {
     return GLib.filename_to_uri(path, null).replace(/"/g, '%22');
+}
+
+function ellipsize(label) {
+    label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+    return label;
 }
 
 export default class SonanceIslandExtension extends Extension {
@@ -73,15 +113,23 @@ export default class SonanceIslandExtension extends Extension {
         GLib.mkdir_with_parents(this._cacheDir, 0o700);
 
         this._proxy = null;
-        this._expanded = false;
+        this._island = null;
+        this._islandProxy = null;
+        this._mode = 'compact';
+        this._hasTrack = false;
+        this._lastTitle = null;
         this._artUrl = null;
+        this._artPath = null;
         this._position = 0;
         this._length = 0;
         this._playing = false;
-        this._volumeTimer = 0;
-        this._closeTimer = 0;
-        this._tickTimer = 0;
+        this._volumeValue = null;
+        this._ownVolumeAt = 0;
+        this._noticeAction = '';
+        this._suppressOpen = false;
         this._settingSliders = false;
+        this._timers = {};
+        this._tickTimer = 0;
 
         this._buildUi();
         this._watchId = Gio.bus_watch_name(Gio.BusType.SESSION, BUS_NAME,
@@ -99,14 +147,28 @@ export default class SonanceIslandExtension extends Extension {
         this._cancellable.cancel();
         this._soup.abort();
         this._disconnect();
-        for (const id of ['_volumeTimer', '_closeTimer', '_tickTimer']) {
-            if (this[id])
-                GLib.source_remove(this[id]);
-            this[id] = 0;
-        }
+        this._stopTick();
+        for (const name of Object.keys(this._timers))
+            this._clearTimer(name);
         this._island.destroy();
         this._island = null;
         this._soup = null;
+    }
+
+    _timer(name, ms, fn) {
+        this._clearTimer(name);
+        this._timers[name] = GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
+            delete this._timers[name];
+            fn();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _clearTimer(name) {
+        if (this._timers[name]) {
+            GLib.source_remove(this._timers[name]);
+            delete this._timers[name];
+        }
     }
 
     /* ------------------------------------------------------------------ UI */
@@ -124,6 +186,8 @@ export default class SonanceIslandExtension extends Extension {
             const h = this._island.height;
             this._island.set_style(`border-radius: ${Math.round(Math.min(h / 2, 38))}px;`);
         });
+        this._island.connect('button-press-event', () => this._onClick());
+        this._island.connect('scroll-event', (a, e) => this._onScroll(e));
 
         // Clips the content while the pill grows; the pill itself keeps its shadow.
         const clip = new St.Widget({
@@ -135,18 +199,13 @@ export default class SonanceIslandExtension extends Extension {
         this._island.add_child(clip);
 
         /* Collapsed: cover, title, level bars. */
-        this._compact = new St.BoxLayout({
-            style_class: 'sonance-island-compact',
-            x_expand: true,
-            y_expand: true,
-        });
+        this._compact = new St.BoxLayout({style_class: 'sonance-island-compact', x_expand: true, y_expand: true});
         this._smallArt = new St.Bin({style_class: 'sonance-island-compact-art', y_align: Clutter.ActorAlign.CENTER});
-        this._smallTitle = new St.Label({
+        this._smallTitle = ellipsize(new St.Label({
             style_class: 'sonance-island-compact-title',
             x_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
-        });
-        this._smallTitle.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+        }));
         this._bars = new St.BoxLayout({style_class: 'sonance-island-bars', y_align: Clutter.ActorAlign.CENTER});
         for (let i = 0; i < 4; i++) {
             const bar = new St.Widget({style_class: 'sonance-island-bar', pivot_point: new Graphene.Point({x: 0.5, y: 0.5})});
@@ -158,11 +217,59 @@ export default class SonanceIslandExtension extends Extension {
         this._compact.add_child(this._bars);
         clip.add_child(this._compact);
 
+        /* Volume pop-up: icon, level, percent. */
+        this._volPeek = new St.BoxLayout({
+            style_class: 'sonance-island-volpeek',
+            x_expand: true,
+            y_expand: true,
+            opacity: 0,
+            visible: false,
+        });
+        this._volPeekIcon = new St.Icon({icon_name: 'audio-volume-medium-symbolic', icon_size: 15, y_align: Clutter.ActorAlign.CENTER});
+        this._volTrack = new St.Widget({
+            style_class: 'sonance-island-level',
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._volFill = new St.Widget({style_class: 'sonance-island-level-fill'});
+        this._volTrack.add_child(this._volFill);
+        this._volTrack.connect('notify::width', () => this._paintVolPeek());
+        this._volPeekLabel = new St.Label({style_class: 'sonance-island-volpeek-label', y_align: Clutter.ActorAlign.CENTER});
+        this._volPeek.add_child(this._volPeekIcon);
+        this._volPeek.add_child(this._volTrack);
+        this._volPeek.add_child(this._volPeekLabel);
+        clip.add_child(this._volPeek);
+
+        /* Notice pop-up: picture or icon, title, line of text. */
+        this._peek = new St.BoxLayout({
+            style_class: 'sonance-island-peek',
+            width: SIZES.peek.width,
+            x_align: Clutter.ActorAlign.CENTER,
+            y_expand: true,
+            opacity: 0,
+            visible: false,
+        });
+        this._peekArt = new St.Bin({style_class: 'sonance-island-peek-art', y_align: Clutter.ActorAlign.CENTER});
+        this._peekIcon = new St.Icon({icon_size: 18, x_align: Clutter.ActorAlign.CENTER, y_align: Clutter.ActorAlign.CENTER});
+        this._peekArt.set_child(this._peekIcon);
+        const peekText = new St.BoxLayout({
+            orientation: Clutter.Orientation.VERTICAL,
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._peekTitle = ellipsize(new St.Label({style_class: 'sonance-island-peek-title'}));
+        this._peekBody = ellipsize(new St.Label({style_class: 'sonance-island-peek-body'}));
+        peekText.add_child(this._peekTitle);
+        peekText.add_child(this._peekBody);
+        this._peek.add_child(this._peekArt);
+        this._peek.add_child(peekText);
+        clip.add_child(this._peek);
+
         /* Expanded. Fixed width and pinned to the top, so growing reveals it. */
         this._full = new St.BoxLayout({
             style_class: 'sonance-island-expanded',
             orientation: Clutter.Orientation.VERTICAL,
-            width: EXPANDED_WIDTH,
+            width: SIZES.expanded.width,
             x_align: Clutter.ActorAlign.CENTER,
             y_align: Clutter.ActorAlign.START,
             opacity: 0,
@@ -172,23 +279,25 @@ export default class SonanceIslandExtension extends Extension {
 
         const top = new St.BoxLayout();
         this._art = new St.Button({style_class: 'sonance-island-art', y_align: Clutter.ActorAlign.CENTER});
-        this._art.connect('clicked', () => this._raise());
+        this._art.connect('clicked', () => this._activate('raise'));
         const info = new St.BoxLayout({
             style_class: 'sonance-island-info',
             orientation: Clutter.Orientation.VERTICAL,
             x_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
         });
-        this._room = new St.Label({style_class: 'sonance-island-room'});
-        this._title = new St.Label({style_class: 'sonance-island-title'});
-        this._artist = new St.Label({style_class: 'sonance-island-artist'});
-        for (const l of [this._room, this._title, this._artist]) {
-            l.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+        this._room = ellipsize(new St.Label({style_class: 'sonance-island-room'}));
+        this._title = ellipsize(new St.Label({style_class: 'sonance-island-title'}));
+        this._artist = ellipsize(new St.Label({style_class: 'sonance-island-artist'}));
+        for (const l of [this._room, this._title, this._artist])
             info.add_child(l);
-        }
         top.add_child(this._art);
         top.add_child(info);
         this._full.add_child(top);
+
+        this._lyric = ellipsize(new St.Label({style_class: 'sonance-island-lyric', visible: false}));
+        this._lyric.clutter_text.line_alignment = Pango.Alignment.CENTER;
+        this._full.add_child(this._lyric);
 
         const seekRow = new St.BoxLayout({style: 'spacing: 8px;'});
         this._elapsed = new St.Label({style_class: 'sonance-island-time', y_align: Clutter.ActorAlign.CENTER});
@@ -200,16 +309,14 @@ export default class SonanceIslandExtension extends Extension {
             if (this._seek._grab)
                 this._showTimes(this._seek.value * this._length);
         });
-        this._seek.connect('scroll-event', () => Clutter.EVENT_STOP);
+        // Scrolling over the seek bar adjusts the volume like the rest of the island.
+        this._seek.connect('scroll-event', (a, e) => this._onScroll(e));
         seekRow.add_child(this._elapsed);
         seekRow.add_child(this._seek);
         seekRow.add_child(this._remaining);
         this._full.add_child(seekRow);
 
-        const controls = new St.BoxLayout({
-            style_class: 'sonance-island-controls',
-            x_align: Clutter.ActorAlign.CENTER,
-        });
+        const controls = new St.BoxLayout({style_class: 'sonance-island-controls', x_align: Clutter.ActorAlign.CENTER});
         const button = (icon, size, action) => {
             const b = new St.Button({
                 style_class: 'sonance-island-button',
@@ -233,90 +340,216 @@ export default class SonanceIslandExtension extends Extension {
         });
         this._volume = new Slider.Slider(0);
         this._volume.y_align = Clutter.ActorAlign.CENTER;
-        this._volume.connect('notify::value', () => this._onVolume());
+        this._volume.connect('notify::value', () => this._onVolumeSlider());
         volRow.add_child(this._volIcon);
         volRow.add_child(this._volume);
         this._full.add_child(volRow);
 
+        this._layers = {compact: this._compact, volume: this._volPeek, peek: this._peek, expanded: this._full};
         Main.layoutManager.addTopChrome(this._island, {trackFullscreen: true});
     }
 
     /* Geometry, centred on the top bar of the primary monitor. */
-    _geometry(expanded) {
+    _geometry(mode) {
         const [px, py] = Main.panel.get_transformed_position();
         const [pw, ph] = Main.panel.get_transformed_size();
-        const h = Math.max(24, ph - 6);
-        const y = Math.round(py + (ph - h) / 2);
-        const w = expanded ? EXPANDED_WIDTH : COMPACT_WIDTH;
-        const height = expanded ? EXPANDED_HEIGHT : h;
-        return {x: Math.round(px + (pw - w) / 2), y, width: w, height};
+        const bar = Math.max(24, ph - 6);
+        const width = SIZES[mode].width;
+        let height = SIZES[mode].height ?? bar;
+        if (mode === 'expanded')
+            height = Math.ceil(this._full.get_preferred_height(width)[1]);
+        return {x: Math.round(px + (pw - width) / 2), y: Math.round(py + (ph - bar) / 2), width, height};
     }
 
     _place(animate) {
         if (!this._island)
             return;
-        const g = this._geometry(this._expanded);
+        const g = this._geometry(this._mode);
         if (!animate) {
-            this._island.remove_transition('x');
-            this._island.remove_transition('width');
-            this._island.remove_transition('height');
+            for (const p of ['x', 'y', 'width', 'height'])
+                this._island.remove_transition(p);
             this._island.set_position(g.x, g.y);
             this._island.set_size(g.width, g.height);
             return;
         }
+        const opening = g.width * g.height > this._island.width * this._island.height;
         this._island.ease({
             ...g,
-            duration: this._expanded ? OPEN_MS : CLOSE_MS,
+            duration: opening ? OPEN_MS : CLOSE_MS,
             // A little overshoot on the way open, like the real thing.
-            mode: this._expanded ? Clutter.AnimationMode.EASE_OUT_BACK : Clutter.AnimationMode.EASE_OUT_QUINT,
+            mode: opening ? Clutter.AnimationMode.EASE_OUT_BACK : Clutter.AnimationMode.EASE_OUT_QUINT,
         });
+    }
+
+    _setMode(mode) {
+        if (!this._island)
+            return;
+        if (mode !== 'peek' && mode !== 'volume')
+            this._clearTimer('peek');
+        if (mode === 'compact' && !this._hasTrack) {
+            // Nothing to collapse to: fade away.
+            this._mode = 'compact';
+            this._stopTick();
+            this._island.ease({
+                opacity: 0,
+                duration: 200,
+                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                onComplete: () => {
+                    if (!this._hasTrack && this._mode === 'compact')
+                        this._island.hide();
+                },
+            });
+            return;
+        }
+        if (!this._island.visible) {
+            this._mode = 'compact';
+            this._place(false);
+            this._island.opacity = 0;
+            this._island.show();
+        }
+        this._island.ease({opacity: 255, duration: 200, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
+        const previous = this._mode;
+        this._mode = mode;
+        for (const [name, layer] of Object.entries(this._layers)) {
+            if (name === mode) {
+                layer.show();
+                layer.ease({opacity: 255, duration: 240, delay: name === previous ? 0 : 90, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
+            } else if (layer.visible) {
+                layer.ease({
+                    opacity: 0,
+                    duration: 120,
+                    mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                    onComplete: () => {
+                        if (this._mode !== name)
+                            layer.hide();
+                    },
+                });
+            }
+        }
+        this._place(true);
+        if (mode === 'expanded') {
+            this._pollPosition();
+            this._startTick();
+        } else {
+            this._stopTick();
+        }
     }
 
     _onHover() {
         if (this._island.hover) {
-            if (this._closeTimer) {
-                GLib.source_remove(this._closeTimer);
-                this._closeTimer = 0;
-            }
-            this._setExpanded(true);
+            this._clearTimer('close');
+            if (this._mode !== 'expanded' && !this._suppressOpen)
+                this._timer('open', OPEN_DELAY_MS, () => this._setMode('expanded'));
             return;
         }
-        if (this._closeTimer)
-            return;
-        this._closeTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, CLOSE_DELAY_MS, () => {
-            this._closeTimer = 0;
+        this._suppressOpen = false;
+        this._clearTimer('open');
+        this._scheduleClose();
+    }
+
+    _scheduleClose() {
+        this._timer('close', CLOSE_DELAY_MS, () => {
             // Dragging a slider out of the island must not fold it away mid-drag.
-            if (this._island.hover || this._seek._grab || this._volume._grab)
-                return GLib.SOURCE_CONTINUE;
-            this._setExpanded(false);
-            return GLib.SOURCE_REMOVE;
+            if (this._island.hover || this._seek._grab || this._volume._grab) {
+                this._scheduleClose();
+                return;
+            }
+            if (this._mode === 'expanded')
+                this._setMode('compact');
         });
     }
 
-    _setExpanded(on) {
-        if (this._expanded === on)
-            return;
-        this._expanded = on;
-        this._place(true);
-        if (on) {
-            this._full.show();
-            this._compact.ease({opacity: 0, duration: 120, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
-            this._full.ease({opacity: 255, duration: 260, delay: 90, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
-            this._pollPosition();
-            this._startTick();
-        } else {
-            this._full.ease({
-                opacity: 0,
-                duration: 120,
-                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-                onComplete: () => {
-                    if (!this._expanded)
-                        this._full.hide();
-                },
-            });
-            this._compact.ease({opacity: 255, duration: 220, delay: 120, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
-            this._stopTick();
+    _onClick() {
+        if (this._mode === 'compact') {
+            // Quick click on the pill: play/pause, and don't spring open under the pointer.
+            this._clearTimer('open');
+            this._suppressOpen = true;
+            this._proxy?.PlayPauseAsync().catch(() => {});
+            return Clutter.EVENT_STOP;
         }
+        if (this._mode === 'peek' || this._mode === 'volume') {
+            const action = this._mode === 'peek' ? this._noticeAction : '';
+            if (action) {
+                this._activate(action);
+                this._suppressOpen = true;
+                this._setMode('compact');
+            } else {
+                this._setMode('expanded');
+            }
+            return Clutter.EVENT_STOP;
+        }
+        return Clutter.EVENT_PROPAGATE;
+    }
+
+    _onScroll(event) {
+        // A wheel notch also arrives as an emulated smooth scroll; count it once.
+        if (!this._proxy || this._volumeValue === null || event.is_pointer_emulated())
+            return Clutter.EVENT_STOP;
+        let step = 0;
+        switch (event.get_scroll_direction()) {
+        case Clutter.ScrollDirection.UP:
+            step = SCROLL_STEP;
+            break;
+        case Clutter.ScrollDirection.DOWN:
+            step = -SCROLL_STEP;
+            break;
+        case Clutter.ScrollDirection.SMOOTH: {
+            const [, dy] = event.get_scroll_delta();
+            step = -dy * SCROLL_STEP;
+            break;
+        }
+        default:
+            return Clutter.EVENT_STOP;
+        }
+        const v = Math.max(0, Math.min(1, this._volume.value + step));
+        this._volume.value = v; // sends it, throttled
+        if (this._mode !== 'expanded')
+            this._showVolumePeek(v);
+        return Clutter.EVENT_STOP;
+    }
+
+    /* ------------------------------------------------------------ pop-ups */
+
+    _peekFor(mode, ms) {
+        this._setMode(mode);
+        this._timer('peek', ms, () => {
+            if (this._mode === mode)
+                this._setMode(this._island.hover && !this._suppressOpen ? 'expanded' : 'compact');
+        });
+    }
+
+    _showVolumePeek(v) {
+        this._volumeValue = v;
+        this._paintVolPeek();
+        this._volPeekLabel.text = `${Math.round(v * 100)}`;
+        this._volPeekIcon.icon_name = this._volumeIconName(v);
+        this._peekFor('volume', VOLUME_PEEK_MS);
+    }
+
+    _paintVolPeek() {
+        const [w, h] = this._volTrack.get_size();
+        if (w > 0)
+            this._volFill.set_size(Math.round(w * (this._volumeValue ?? 0)), h);
+    }
+
+    _showNotice(kind, title, body, action) {
+        if (this._mode === 'expanded')
+            return;
+        this._noticeAction = action;
+        this._peekTitle.text = title;
+        this._peekBody.text = body;
+        const icon = KIND_ICONS[kind];
+        if (icon) {
+            this._peekArt.set_style('');
+            this._peekArt.add_style_class_name('icon');
+            this._peekIcon.icon_name = icon;
+            this._peekIcon.show();
+        } else {
+            this._peekArt.remove_style_class_name('icon');
+            this._peekArt.set_style(this._artPath ? `background-image: url("${cssUrl(this._artPath)}");` : '');
+            this._peekIcon.hide();
+        }
+        this._peekFor('peek', action ? PEEK_MS * 2 : PEEK_MS);
     }
 
     /* ------------------------------------------------------------ D-Bus */
@@ -329,13 +562,26 @@ export default class SonanceIslandExtension extends Extension {
                 return;
             }
             this._proxy = proxy;
-            this._changedId = proxy.connect('g-properties-changed', () => this._update());
+            this._changedId = proxy.connect('g-properties-changed', (p, changed) => {
+                const keys = Object.keys(changed.deepUnpack());
+                this._update(keys.includes('Volume'));
+            });
             this._seekedId = proxy.connectSignal('Seeked', (p, s, [pos]) => {
                 this._position = pos;
                 this._showTimes(pos);
             });
-            this._update();
+            this._update(false);
             this._pollPosition();
+        }, this._cancellable);
+
+        new IslandProxy(Gio.DBus.session, BUS_NAME, PATH, (proxy, error) => {
+            if (error || !this._island)
+                return;
+            this._islandProxy = proxy;
+            this._lyricId = proxy.connect('g-properties-changed', () => this._showLyric());
+            this._noticeId = proxy.connectSignal('Notice', (p, s, [kind, title, body, action]) =>
+                this._showNotice(kind, title, body, action));
+            this._showLyric();
         }, this._cancellable);
     }
 
@@ -345,16 +591,28 @@ export default class SonanceIslandExtension extends Extension {
             this._proxy.disconnectSignal(this._seekedId);
             this._proxy = null;
         }
+        if (this._islandProxy) {
+            this._islandProxy.disconnect(this._lyricId);
+            this._islandProxy.disconnectSignal(this._noticeId);
+            this._islandProxy = null;
+        }
+        this._hasTrack = false;
+        this._lastTitle = null;
+        this._volumeValue = null;
         if (this._island) {
-            this._expanded = false;
+            this._mode = 'compact';
             this._island.hide();
             this._stopTick();
         }
     }
 
-    _raise() {
-        Gio.DBus.session.call(BUS_NAME, PATH, 'org.mpris.MediaPlayer2', 'Raise',
-            null, null, Gio.DBusCallFlags.NONE, -1, null, null);
+    _activate(action) {
+        if (this._islandProxy) {
+            this._islandProxy.ActivateAsync(action).catch(() => {});
+        } else if (action === 'raise') {
+            Gio.DBus.session.call(BUS_NAME, PATH, 'org.mpris.MediaPlayer2', 'Raise',
+                null, null, Gio.DBusCallFlags.NONE, -1, null, null);
+        }
     }
 
     /* Position isn't signalled (MPRIS asks players not to), so ask for it. */
@@ -407,34 +665,37 @@ export default class SonanceIslandExtension extends Extension {
         this._proxy.SetPositionAsync(track, pos).catch(() => {});
     }
 
-    _onVolume() {
-        this._updateVolumeIcon();
-        if (this._settingSliders || this._volumeTimer)
+    _onVolumeSlider() {
+        this._volIcon.icon_name = this._volumeIconName(this._volume.value);
+        if (this._settingSliders)
             return;
-        this._volumeTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, VOLUME_EVERY_MS, () => {
-            this._volumeTimer = 0;
+        this._ownVolumeAt = Date.now();
+        if (this._timers.volume)
+            return;
+        this._timer('volume', VOLUME_EVERY_MS, () => {
+            this._ownVolumeAt = Date.now();
             if (this._proxy)
                 this._proxy.Volume = this._volume.value;
-            return GLib.SOURCE_REMOVE;
         });
     }
 
-    _updateVolumeIcon() {
-        const v = this._volume.value;
+    _volumeIconName(v) {
         const level = v === 0 ? 'muted' : v < 0.34 ? 'low' : v < 0.67 ? 'medium' : 'high';
-        this._volIcon.icon_name = `audio-volume-${level}-symbolic`;
+        return `audio-volume-${level}-symbolic`;
     }
 
     /* ------------------------------------------------------------ display */
 
-    _update() {
+    _update(volumeChanged) {
         const p = this._proxy;
         if (!p || !this._island)
             return;
         const md = p.Metadata ?? {};
         const title = md['xesam:title']?.unpack() ?? '';
-        if (!title) {
-            this._disconnectedLook();
+        this._hasTrack = title !== '';
+        if (!this._hasTrack) {
+            if (this._mode === 'compact')
+                this._setMode('compact');
             return;
         }
         const artist = (md['xesam:artist']?.deepUnpack() ?? []).filter(a => a).join(', ');
@@ -456,27 +717,43 @@ export default class SonanceIslandExtension extends Extension {
         this._prev.reactive = this._next.reactive = p.CanGoNext ?? true;
         this._seek.reactive = this._length > 0;
 
-        if (!this._volume._grab && this._volumeTimer === 0) {
+        // The volume: pop up when it was changed somewhere else (phone, speaker buttons).
+        const v = p.Volume ?? 0;
+        const first = this._volumeValue === null;
+        if (!this._volume._grab && !this._timers.volume) {
             this._settingSliders = true;
-            this._volume.value = p.Volume ?? 0;
+            this._volume.value = v;
             this._settingSliders = false;
-            this._updateVolumeIcon();
+            this._volIcon.icon_name = this._volumeIconName(v);
         }
+        const elsewhere = Date.now() - this._ownVolumeAt > 1500;
+        if (volumeChanged && !first && elsewhere && this._mode !== 'expanded' && Math.abs(v - this._volumeValue) > 0.001)
+            this._showVolumePeek(v);
+        this._volumeValue = v;
+
         this._setArt(md['mpris:artUrl']?.unpack() ?? null);
         this._showTimes(this._position);
 
+        const songChanged = this._lastTitle !== null && this._lastTitle !== title;
+        this._lastTitle = title;
         if (!this._island.visible) {
-            this._place(false);
-            this._island.opacity = 0;
-            this._island.show();
-            this._island.ease({opacity: 255, duration: 250, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
+            this._setMode('compact');
+        } else if (songChanged && playing && this._mode === 'compact') {
+            // Wait a moment so the new cover has a chance to arrive.
+            this._timer('songPeek', 400, () => {
+                if (this._mode === 'compact')
+                    this._showNotice('song', title, artist, '');
+            });
         }
     }
 
-    _disconnectedLook() {
-        this._expanded = false;
-        this._island.hide();
-        this._stopTick();
+    _showLyric() {
+        const line = this._islandProxy?.Lyric ?? '';
+        const wasVisible = this._lyric.visible;
+        this._lyric.text = line;
+        this._lyric.visible = line !== '';
+        if (wasVisible !== this._lyric.visible && this._mode === 'expanded')
+            this._place(true);
     }
 
     _showTimes(pos) {
@@ -552,8 +829,11 @@ export default class SonanceIslandExtension extends Extension {
     _paintArt(path) {
         if (!this._island)
             return;
+        this._artPath = path;
         const style = path ? `background-image: url("${cssUrl(path)}");` : '';
         this._smallArt.set_style(style);
         this._art.set_style(style);
+        if (this._mode === 'peek' && !this._peekArt.has_style_class_name('icon'))
+            this._peekArt.set_style(style);
     }
 }

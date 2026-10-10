@@ -4,6 +4,7 @@ mod browse;
 mod coverflow;
 mod glass;
 mod dialogs;
+mod extras;
 mod player;
 mod output;
 mod queue;
@@ -58,6 +59,9 @@ pub struct App {
     pub output: output::OutputSection,
     pub mpris: RefCell<Option<crate::mpris::Mpris>>,
     pub events: RefCell<Option<crate::sonos::events::Events>>,
+    pub extras: extras::Extras,
+    /// The phone microphone page, while the Calibrate dialog uses it.
+    pub phone: RefCell<Option<crate::phone::Phone>>,
 
     pub groups: RefCell<Vec<Group>>,
     summaries: RefCell<HashMap<String, String>>,
@@ -224,6 +228,8 @@ impl App {
             output,
             mpris: RefCell::default(),
             events: RefCell::default(),
+            extras: extras::Extras::default(),
+            phone: RefCell::default(),
             groups: RefCell::default(),
             summaries: RefCell::default(),
             selected: RefCell::default(),
@@ -287,6 +293,7 @@ impl App {
         app.connect_room();
         app.connect_output();
         app.connect_system();
+        app.connect_extras();
         app
     }
 
@@ -473,6 +480,7 @@ impl App {
                     app.refresh_cover();
                 }
             }
+            app.extras_tick(t);
             if t % 2 == 0 && app.stack.visible_child_name().as_deref() == Some("queue") {
                 app.refresh_queue(false);
             }
@@ -666,10 +674,11 @@ impl App {
                 let alarms = sonos.alarms(&ip).await.unwrap_or_default();
                 let queue = sonos.queue(&coord_ip).await.unwrap_or_default();
                 let acc = sonos::Sonos::spotify_account(&favs, &alarms, &queue);
-                (favs, acc)
+                (favs, acc, alarms)
             },
-            move |(favs, acc)| {
+            move |(favs, acc, alarms)| {
                 let Some(app) = w.upgrade() else { return };
+                *app.extras.alarms.borrow_mut() = alarms;
                 *app.favorites.borrow_mut() = favs;
                 if let Some(acc) = acc {
                     *app.spotify_acc.borrow_mut() = acc;
@@ -707,7 +716,9 @@ impl App {
                     let track_changed = s.track_no != old.track_no || s.title != old.title;
                     let cover_stale = track_changed || s.from_queue != old.from_queue || s.shuffle() != old.shuffle() || s.art != old.art;
                     *app.status.borrow_mut() = s;
+                    app.extras.status_at.set(Some(Instant::now()));
                     app.player.update(&app);
+                    app.update_lyrics();
                     app.mpris_sync();
                     if track_changed {
                         app.queue.highlight(app.status.borrow().track_no);

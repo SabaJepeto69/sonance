@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Sonance microphone</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: #000; color: #fff;
+    font: 17px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 24px 16px; text-align: center; gap: 22px;
+  }
+  h1 { font-size: 26px; margin: 0; letter-spacing: -0.02em; }
+  p { margin: 0; color: rgba(255,255,255,0.62); max-width: 30em; }
+  button {
+    font: inherit; font-weight: 700; color: #000; background: #30d158; border: 0;
+    border-radius: 999px; padding: 16px 34px; cursor: pointer;
+  }
+  button:disabled { background: #333; color: #888; }
+  .ring {
+    width: 150px; height: 150px; border-radius: 50%;
+    border: 2px solid rgba(255,255,255,0.12);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .dot {
+    width: 48px; height: 48px; border-radius: 50%; background: #30d158;
+    transition: transform 0.08s linear; transform: scale(0.5); opacity: 0.85;
+  }
+  #status { font-weight: 600; color: #fff; min-height: 1.4em; }
+  .err { color: #ff6961 !important; }
+</style>
+</head>
+<body>
+  <h1>Sonance microphone</h1>
+  <div class="ring"><div class="dot" id="dot"></div></div>
+  <p id="status">Hold the phone where your head is, screen up, and keep the room quiet.</p>
+  <button id="go">Start microphone</button>
+  <p id="hint">Keep this page open until Sonance says it's done.</p>
+<script>
+"use strict";
+const token = new URLSearchParams(location.search).get("t") || "";
+const $ = id => document.getElementById(id);
+const say = (text, err) => { $("status").textContent = text; $("status").classList.toggle("err", !!err); };
+
+let ctx, offset = 0, pending = [], pendingLen = 0, sending = false, finished = false, lock = null;
+
+async function send() {
+  if (sending || !pendingLen) return;
+  sending = true;
+  const buf = new Float32Array(pendingLen);
+  let at = 0;
+  for (const p of pending) { buf.set(p, at); at += p.length; }
+  const start = offset;
+  pending = []; pendingLen = 0; offset += buf.length;
+  try {
+    await fetch(`chunk?t=${encodeURIComponent(token)}&offset=${start}&rate=${ctx.sampleRate}`, {
+      method: "POST", body: buf.buffer, headers: { "Content-Type": "application/octet-stream" },
+    });
+  } catch (e) {
+    say("Lost the connection to Sonance. Is this phone on the same Wi-Fi?", true);
+  }
+  sending = false;
+}
+
+async function poll() {
+  if (finished) return;
+  try {
+    const r = await fetch(`state?t=${encodeURIComponent(token)}`, { cache: "no-store" });
+    const s = await r.json();
+    if (s.phase === "waiting") say(s.message || "Connected. Press Start in Sonance.");
+    if (s.phase === "measuring") say(s.message || "Measuring… keep still and quiet.");
+    if (s.phase === "done") {
+      say(s.message || "Done. You can close this page.");
+      finished = true;
+      stop();
+      return;
+    }
+  } catch (e) { /* the next poll tries again */ }
+  setTimeout(poll, 800);
+}
+
+function stop() {
+  if (ctx) ctx.close();
+  if (lock) lock.release().catch(() => {});
+  $("go").disabled = true;
+  $("go").textContent = "Done";
+  $("dot").style.transform = "scale(0.5)";
+}
+
+$("go").addEventListener("click", async () => {
+  $("go").disabled = true;
+  if (!window.isSecureContext || !navigator.mediaDevices) {
+    say("This browser blocks the microphone on this page. Open the link in Safari or Chrome.", true);
+    return;
+  }
+  try {
+    // Raw sound: the phone's call-processing (echo cancelling, noise removal, auto level)
+    // would spoil the measurement.
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
+    });
+    try { ctx = new AudioContext({ sampleRate: 48000 }); } catch (e) { ctx = new AudioContext(); }
+    await ctx.resume();
+    const src = ctx.createMediaStreamSource(stream);
+    const proc = ctx.createScriptProcessor(4096, 1, 1);
+    const mute = ctx.createGain();
+    mute.gain.value = 0;
+    proc.onaudioprocess = e => {
+      if (finished) return;
+      const data = e.inputBuffer.getChannelData(0);
+      pending.push(new Float32Array(data));
+      pendingLen += data.length;
+      let peak = 0;
+      for (let i = 0; i < data.length; i += 16) peak = Math.max(peak, Math.abs(data[i]));
+      $("dot").style.transform = `scale(${0.5 + Math.min(1, peak * 4) * 1.4})`;
+    };
+    src.connect(proc);
+    proc.connect(mute);
+    mute.connect(ctx.destination);
+    setInterval(send, 400);
+    try { lock = await navigator.wakeLock.request("screen"); } catch (e) { /* not supported */ }
+    $("go").textContent = "Listening";
+    say("Connected. Press Start in Sonance.");
+    poll();
+  } catch (e) {
+    $("go").disabled = false;
+    say(`Couldn't use the microphone: ${e.message || e}`, true);
+  }
+});
+</script>
+</body>
+</html>

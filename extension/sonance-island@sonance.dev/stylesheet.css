@@ -120,3 +120,61 @@
 .sonance-island-volume-icon {
     color: rgba(255, 255, 255, 0.6);
 }
+
+.sonance-island-lyric {
+    font-size: 11pt;
+    font-weight: 700;
+    color: #30d158;
+    padding: 0 4px;
+}
+
+.sonance-island-volpeek {
+    padding: 0 16px 0 14px;
+    spacing: 12px;
+}
+
+.sonance-island-level {
+    height: 6px;
+    border-radius: 3px;
+    background-color: rgba(255, 255, 255, 0.18);
+}
+
+.sonance-island-level-fill {
+    border-radius: 3px;
+    background-color: #fff;
+}
+
+.sonance-island-volpeek-label {
+    font-size: 9.5pt;
+    font-weight: 700;
+    font-feature-settings: "tnum";
+    min-width: 22px;
+}
+
+.sonance-island-peek {
+    padding: 0 20px 0 12px;
+    spacing: 12px;
+}
+
+.sonance-island-peek-art {
+    width: 40px;
+    height: 40px;
+    border-radius: 11px;
+    background-size: cover;
+    background-color: #1c1c1e;
+}
+
+.sonance-island-peek-art.icon {
+    background-color: #30d158;
+    color: #000;
+}
+
+.sonance-island-peek-title {
+    font-size: 10.5pt;
+    font-weight: 700;
+}
+
+.sonance-island-peek-body {
+    font-size: 9.5pt;
+    color: rgba(255, 255, 255, 0.6);
+}

@@ -17,10 +17,22 @@ account, no cloud, no official app needed.
   stays in charge.
 - **Alarms and sleep timer.**
 - **Top-bar island (GNOME).** A Dynamic Island in the middle of the top bar:
-  a small black pill with the cover and title that springs open on hover into
-  the song, a seek bar, previous/play/next and the group volume. Clicking the
-  cover opens Sonance. Keyboard media keys are deliberately left alone: they
-  keep controlling whatever else plays on the PC.
+  a small black pill with the cover and title. Click it to play or pause,
+  scroll on it for volume, rest the pointer on it and it springs open into
+  the song, the current lyric, a seek bar, previous/play/next and the group
+  volume. It also pops open by itself for a moment: a new song, a volume
+  change made from a phone or a speaker's buttons, an alarm going off, a
+  minute left on the sleep timer (click for 15 more), and Spotify starting on
+  this PC (click to move it to the speakers). Keyboard media keys are
+  deliberately left alone: they keep controlling whatever else plays on the
+  PC.
+- **Lyrics.** Synced lyrics under Now Playing and in the island, from
+  [LRCLIB](https://lrclib.net) (free, no account).
+- **Move Spotify from this PC to the speakers.** When the Spotify app plays
+  on this PC, one click (the green button in the player, or the island)
+  plays the same song on the speakers from the same point and pauses the
+  app. Signed in to Spotify in Sonance, the album or playlist comes along
+  too, so the next songs follow.
 - **Live updates.** Speakers notify Sonance the moment something changes,
   including changes made from your phone, instead of being asked every
   second.
@@ -42,8 +54,11 @@ account, no cloud, no official app needed.
   coloured in the treble, so a treble rise shared by every speaker is treated
   as the mic and ignored. A measurement mic gives the best results.
 - **Microphone calibration.** Plays a test sweep from each speaker in turn and
-  measures, with any mic placed at your spot, its real delay and loudness
-  there. Those measurements replace the model's estimates.
+  measures, with a mic placed at your spot, its real delay and loudness
+  there. Those measurements replace the model's estimates. Any mic on the PC
+  works, and so does **your phone**: pick "Phone" and scan the QR code. The
+  phone's mic is usually far better than a webcam's, and you can hold it
+  exactly where your head goes.
 - **This PC's sound on the speakers.** A "Sonance" sound output: anything the
   PC plays (Spotify app, YouTube, games) goes to the speakers.
   - Only Sonos selected: streamed to the group over Wi-Fi, about 0.5 s behind
@@ -89,18 +104,20 @@ Or just build and run it: `cargo run --release`.
 
 ### Firewall
 
-Speakers connect back to this PC on two TCP ports:
+Speakers and your phone connect back to this PC on three TCP ports:
 
-- **8899**: they fetch the PC's sound from here ("Play this PC's sound").
+- **8899**: speakers fetch the PC's sound from here ("Play this PC's sound").
 - **8900**: live updates. Without it Sonance still works, but asks the
   speakers every second instead.
+- **8901**: the phone microphone page, only while the Calibrate dialog uses
+  it.
 
 If you run a firewall, allow them from your LAN only (adjust the subnet to
 yours):
 
 ```sh
-sudo ufw allow from 192.168.1.0/24 to any port 8899:8900 proto tcp      # ufw
-sudo firewall-cmd --add-port=8899-8900/tcp --permanent && sudo firewall-cmd --reload   # firewalld
+sudo ufw allow from 192.168.1.0/24 to any port 8899:8901 proto tcp      # ufw
+sudo firewall-cmd --add-port=8899-8901/tcp --permanent && sudo firewall-cmd --reload   # firewalld
 ```
 
 Spotify sign-in uses a local callback on `127.0.0.1:8898`, which needs no rule.
@@ -129,6 +146,10 @@ system, save one Spotify favorite in the Sonos app.
 
 Development-mode Spotify apps return at most 10 search results per type.
 
+If you connected Spotify before moving playback from the PC existed, connect
+again once (Browse → Spotify) so Sonance may see which playlist the app is
+playing; until then a move brings just the song.
+
 ### Bluetooth speakers
 
 Open the room menu (top left) → **Add Bluetooth speaker…**, put the speaker in
@@ -147,6 +168,11 @@ orbit, scroll over a speaker to turn it), and pick a spot. Without measurements
 the plan uses distances and angles. For real numbers, turn on **Play this PC's
 sound**, put a microphone (a webcam's works) at the spot, and press
 **Calibrate with microphone…**.
+
+With a phone: pick "Phone (scan a QR code)", scan it with the phone's camera
+(same Wi-Fi), accept the browser's certificate warning once (the page makes
+its own certificate, so no outside authority vouches for it), tap **Start
+microphone**, hold the phone at the spot, and press **Start** in Sonance.
 
 ## Command line
 
@@ -171,6 +197,8 @@ sound**, put a microphone (a webcam's works) at the spot, and press
 - `src/mpris.rs` and `extension/`: Sonance's controls on D-Bus (MPRIS
   interfaces under the private name `dev.sonance.Sonance.Controls`) and the
   GNOME Shell extension that draws the island from them.
+- `src/lyrics.rs`, `src/local_spotify.rs`, `src/phone.rs`: LRCLIB lyrics,
+  the Spotify app on this PC (over MPRIS), and the phone microphone page.
 - `src/ui/`: the GTK interface, including the Cairo-drawn 3D room and the
   "liquid glass" menus.
 

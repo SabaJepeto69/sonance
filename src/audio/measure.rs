@@ -31,9 +31,9 @@ const PAD_MS: u32 = 100;
 const MIN_CONFIDENCE: f32 = 0.4;
 /// The sweep spans every EQ band with room to spare at both ends; 1.5 s keeps it short to sit
 /// through while giving the bass enough energy to clear room noise.
-const SWEEP_S: f32 = 1.5;
-const SWEEP_HZ: (f32, f32) = (40.0, 16_000.0);
-const SWEEP_DB: f32 = -12.0;
+pub(super) const SWEEP_S: f32 = 1.5;
+pub(super) const SWEEP_HZ: (f32, f32) = (40.0, 16_000.0);
+pub(super) const SWEEP_DB: f32 = -12.0;
 
 fn ms(n: u32) -> usize {
     (n as u64 * RATE as u64 / 1000) as usize
@@ -50,7 +50,7 @@ fn port_of<'a>(ports: &'a [String], node: &str, monitor: bool) -> Option<&'a str
 
 /// Reads interleaved stereo f32 from the recorder. Returns the samples and the wall-clock
 /// instant that corresponds to frame 0 (the earliest bound over all reads).
-async fn read_recorder(
+pub(super) async fn read_recorder(
     mut out: tokio::process::ChildStdout,
     need: watch::Receiver<usize>,
     progress: watch::Sender<usize>,
@@ -80,7 +80,7 @@ async fn read_recorder(
     (samples, origin)
 }
 
-async fn wait_frames(rx: &mut watch::Receiver<usize>, frames: usize, timeout: Duration) -> bool {
+pub(super) async fn wait_frames(rx: &mut watch::Receiver<usize>, frames: usize, timeout: Duration) -> bool {
     tokio::time::timeout(timeout, rx.wait_for(|&f| f >= frames)).await.is_ok_and(|r| r.is_ok())
 }
 

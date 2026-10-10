@@ -147,3 +147,70 @@ async fn live_bt_devices() {
 async fn live_reap_stale() {
     pw::kill_stale().await;
 }
+
+/// The phone microphone end to end, inaudibly: a stand-in "phone" records the test sink at
+/// 44.1 kHz and streams it over HTTPS to the phone page; two marked sweeps, the second
+/// through a 250 ms delay line, must come out 250 ms apart.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn live_phone_take() {
+    with_test_sink(|e| async move {
+        let phone = crate::phone::Phone::start().await.unwrap();
+        let url = phone.url.clone();
+        let (base, query) = url.split_once("/?").unwrap();
+        let (base, token) = (base.to_string(), query.trim_start_matches("t=").to_string());
+        let client = reqwest::Client::builder().danger_accept_invalid_certs(true).build().unwrap();
+        assert!(client.get(&url).send().await.unwrap().text().await.unwrap().contains("Sonance microphone"));
+        assert_eq!(client.get(format!("{base}/state?t=wrong")).send().await.unwrap().status(), 403);
+
+        let mut rec = tokio::process::Command::new("pw-cat")
+            .args(["--record", "--raw", "--rate", "44100", "--channels", "1", "--format", "f32", "--target", TEST_SINK])
+            .args(["-P", "{ stream.capture.sink=true }", "-"])
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut out = rec.stdout.take().unwrap();
+        let streamer = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let (mut offset, mut buf) = (0usize, vec![0u8; 4096 * 4]);
+            loop {
+                let mut got = 0;
+                while got < buf.len() {
+                    match out.read(&mut buf[got..]).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => got += n,
+                    }
+                }
+                let n = got / 4;
+                let _ = client
+                    .post(format!("{base}/chunk?t={token}&offset={offset}&rate=44100"))
+                    .body(buf[..got].to_vec())
+                    .send()
+                    .await;
+                offset += n;
+            }
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(phone.connected());
+        phone.restart_take();
+
+        let route = |delay_ms| [Route { sink: TEST_SINK.into(), delay_ms, ..Default::default() }];
+        let mut sent = Vec::new();
+        for delay in [0.0, 250.0] {
+            e.set_routes(&route(delay)).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            sent.push(e.play_marked("sonance").await.unwrap());
+            tokio::time::sleep(Duration::from_millis(2500)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        let (rate, take, origin) = phone.take().unwrap();
+        streamer.abort();
+        let a = crate::audio::analyse_remote(&take, rate, origin, sent[0], 1500).unwrap();
+        let b = crate::audio::analyse_remote(&take, rate, origin, sent[1], 1500).unwrap();
+        println!("rate {rate}, {} s; a {a:?}\nb {b:?}", take.len() / rate as usize);
+        assert!((b.latency_ms - a.latency_ms - 250.0).abs() < 15.0, "{} vs {}", a.latency_ms, b.latency_ms);
+        phone.stop();
+    })
+    .await;
+}

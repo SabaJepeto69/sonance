@@ -129,6 +129,7 @@ impl App {
             }
             s.position = s.position.saturating_add(1).min(s.duration);
         }
+        self.extras.status_at.set(Some(std::time::Instant::now()));
         self.player.update(self);
         self.mpris_sync();
     }
@@ -166,6 +167,14 @@ impl App {
     fn handle_mpris(self: &Rc<Self>, cmd: Cmd) {
         if let Cmd::Raise = cmd {
             self.window.present();
+            return;
+        }
+        if let Cmd::Action(a) = &cmd {
+            match a.as_str() {
+                "handoff" => self.handoff(),
+                "sleep-extend" => self.extend_sleep(),
+                _ => self.window.present(),
+            }
             return;
         }
         if let Cmd::Quit = cmd {
@@ -207,7 +216,7 @@ impl App {
                 let mode = sonos::play_mode(s.shuffle(), rep);
                 self.act(async move { sonos.set_play_mode(&c.ip, mode).await });
             }
-            Cmd::Raise | Cmd::Quit => {}
+            Cmd::Raise | Cmd::Quit | Cmd::Action(_) => {}
         }
     }
 
