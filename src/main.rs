@@ -1,5 +1,6 @@
 mod audio;
 mod config;
+mod island;
 mod local_spotify;
 mod lyrics;
 mod mpris;

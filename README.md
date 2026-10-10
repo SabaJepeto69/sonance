@@ -16,7 +16,8 @@ account, no cloud, no official app needed.
   through the Spotify account linked in your Sonos system, so the Sonos queue
   stays in charge.
 - **Alarms and sleep timer.**
-- **Top-bar island (GNOME).** A Dynamic Island in the middle of the top bar:
+- **Top-bar island (GNOME 47–50).** Turn it on in **Menu → Settings**,
+  which first checks that your desktop supports it. A Dynamic Island in the middle of the top bar:
   a small black pill with the cover and title. Click it to play or pause,
   scroll on it for volume, rest the pointer on it and it springs open into
   the song, the current lyric, a seek bar, previous/play/next and the group
@@ -38,7 +39,7 @@ account, no cloud, no official app needed.
   second.
 - **Runs in the background.** Closing the window keeps the island and the PC
   sound output working; **Quit Sonance** in the menu really quits. It can
-  also start at login, hidden (Preferences).
+  also start at login, hidden (Settings).
 - **Speaker settings.** Bass, treble, loudness, night sound and speech
   enhancement (home-theatre models), status light and button lock.
 - **3D Room tab.** Place your speakers and one or more listening spots in a
@@ -96,7 +97,6 @@ sudo apt install cargo libgtk-4-dev libadwaita-1-dev pipewire-bin pipewire-pulse
 git clone https://github.com/SabaJepeto69/sonance
 cd sonance
 ./install.sh            # builds and installs to ~/.local, adds an app-menu entry
-                        # and, on GNOME, the top-bar island extension
 ./install.sh uninstall  # removes it
 ```
 

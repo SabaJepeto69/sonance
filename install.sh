@@ -34,18 +34,4 @@ rm -f /tmp/dev.sonance.Sonance.desktop
 command -v update-desktop-database >/dev/null && update-desktop-database "$APPS" 2>/dev/null || true
 echo "Installed: $BIN/sonance (and an app-menu entry)."
 
-# The top-bar island, on GNOME only.
-if command -v gnome-shell >/dev/null 2>&1; then
-    mkdir -p "$EXT"
-    cp extension/$EXT_UUID/* "$EXT/"
-    if ! gnome-extensions enable "$EXT_UUID" 2>/dev/null; then
-        # A brand-new extension is only seen after logging in again (Wayland).
-        cur=$(gsettings get org.gnome.shell enabled-extensions)
-        case "$cur" in
-            *"$EXT_UUID"*) ;;
-            "@as []") gsettings set org.gnome.shell enabled-extensions "['$EXT_UUID']" ;;
-            *) gsettings set org.gnome.shell enabled-extensions "${cur%]}, '$EXT_UUID']" ;;
-        esac
-        echo "Top-bar island installed: log out and back in to see it."
-    fi
-fi
+echo "On GNOME, turn on the top-bar island in Sonance: Menu → Settings."

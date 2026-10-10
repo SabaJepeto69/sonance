@@ -302,7 +302,7 @@ impl App {
             ("Group rooms…", |a| a.show_group_dialog()),
             ("Room settings…", |a| a.show_room_settings()),
             ("Spotify account…", |a| a.show_spotify_dialog()),
-            ("Preferences…", |a| a.show_preferences()),
+            ("Settings…", |a| a.show_settings()),
             ("About Sonance", |a| a.show_about()),
             ("Quit Sonance", |a| a.quit()),
         ];

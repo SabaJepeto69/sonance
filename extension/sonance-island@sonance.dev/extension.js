@@ -176,9 +176,11 @@ export default class SonanceIslandExtension extends Extension {
     _buildUi() {
         this._island = new St.Widget({
             style_class: 'sonance-island',
-            reactive: true,
+            reactive: false,
             track_hover: true,
-            visible: false,
+            opacity: 0,
+            width: 0,
+            height: 0,
             layout_manager: new Clutter.BinLayout(),
         });
         this._island.connect('notify::hover', () => this._onHover());
@@ -345,6 +347,10 @@ export default class SonanceIslandExtension extends Extension {
         volRow.add_child(this._volume);
         this._full.add_child(volRow);
 
+        // GNOME's chrome tracking owns the actor's `visible` (it hides top chrome over
+        // fullscreen windows and shows it again), so the island is "hidden" by being
+        // empty and transparent instead, and keeps its own flag.
+        this._shown = false;
         this._layers = {compact: this._compact, volume: this._volPeek, peek: this._peek, expanded: this._full};
         Main.layoutManager.addTopChrome(this._island, {trackFullscreen: true});
     }
@@ -362,7 +368,8 @@ export default class SonanceIslandExtension extends Extension {
     }
 
     _place(animate) {
-        if (!this._island)
+        // A hidden island stays 0×0, so it takes no clicks from the top bar.
+        if (!this._island || !this._shown)
             return;
         const g = this._geometry(this._mode);
         if (!animate) {
@@ -396,16 +403,17 @@ export default class SonanceIslandExtension extends Extension {
                 mode: Clutter.AnimationMode.EASE_OUT_QUAD,
                 onComplete: () => {
                     if (!this._hasTrack && this._mode === 'compact')
-                        this._island.hide();
+                        this._hideIsland();
                 },
             });
             return;
         }
-        if (!this._island.visible) {
+        if (!this._shown) {
             this._mode = 'compact';
+            this._shown = true;
+            this._island.reactive = true;
             this._place(false);
             this._island.opacity = 0;
-            this._island.show();
         }
         this._island.ease({opacity: 255, duration: 200, mode: Clutter.AnimationMode.EASE_OUT_QUAD});
         const previous = this._mode;
@@ -433,6 +441,14 @@ export default class SonanceIslandExtension extends Extension {
         } else {
             this._stopTick();
         }
+    }
+
+    _hideIsland() {
+        this._shown = false;
+        this._island.remove_all_transitions();
+        this._island.reactive = false;
+        this._island.opacity = 0;
+        this._island.set_size(0, 0);
     }
 
     _onHover() {
@@ -601,7 +617,7 @@ export default class SonanceIslandExtension extends Extension {
         this._volumeValue = null;
         if (this._island) {
             this._mode = 'compact';
-            this._island.hide();
+            this._hideIsland();
             this._stopTick();
         }
     }
@@ -736,7 +752,7 @@ export default class SonanceIslandExtension extends Extension {
 
         const songChanged = this._lastTitle !== null && this._lastTitle !== title;
         this._lastTitle = title;
-        if (!this._island.visible) {
+        if (!this._shown) {
             this._setMode('compact');
         } else if (songChanged && playing && this._mode === 'compact') {
             // Wait a moment so the new cover has a chance to arrive.

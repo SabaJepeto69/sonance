@@ -4,9 +4,11 @@
 use adw::prelude::*;
 use gtk::glib;
 use std::path::PathBuf;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::{spawn, widgets, App};
+use crate::island;
 use crate::mpris::{Cmd, Mpris, State};
 use crate::sonos::events::{Event, Events, Kind};
 use crate::sonos::{self, PlayState};
@@ -234,42 +236,52 @@ impl App {
         }
     }
 
-    pub(super) fn show_preferences(self: &Rc<Self>) {
-        let list = widgets::boxed_list();
+    pub(super) fn show_settings(self: &Rc<Self>) {
+        let page = adw::PreferencesPage::new();
+
+        // Top bar: the island, once the desktop is known to support it.
+        let top = adw::PreferencesGroup::builder()
+            .title("Top bar")
+            .description("A Dynamic Island in the middle of GNOME's top bar: click to play or pause, scroll for volume, rest the pointer on it for the full controls.")
+            .build();
+        let island_row = adw::ActionRow::builder().title("Top-bar island").subtitle("Checking your system…").build();
+        let island_btn = gtk::Button::builder().label("Turn on").valign(gtk::Align::Center).css_classes(["pill"]).sensitive(false).build();
+        let spinner = adw::Spinner::new();
+        island_row.add_suffix(&spinner);
+        island_row.add_suffix(&island_btn);
+        top.add(&island_row);
+        page.add(&top);
+
+        let bg_group = adw::PreferencesGroup::builder().title("In the background").build();
         let bg = adw::SwitchRow::builder()
             .title("Keep running when closed")
             .subtitle("The top-bar island and the PC sound output keep working")
             .active(!self.core.cfg.lock().unwrap().quit_on_close)
             .build();
         let login = adw::SwitchRow::builder().title("Start when you log in").subtitle("Starts quietly in the background").active(autostart_file().exists()).build();
-        list.append(&bg);
-        list.append(&login);
-        let note = gtk::Label::builder()
-            .label(format!(
+        bg_group.add(&bg);
+        bg_group.add(&login);
+        page.add(&bg_group);
+
+        let now = adw::PreferencesGroup::builder().title("Now Playing").build();
+        let lyrics = adw::SwitchRow::builder().title("Lyrics").subtitle("Synced lyrics from LRCLIB, when it has them").active(self.player.lyrics_btn.is_active()).build();
+        now.add(&lyrics);
+        page.add(&now);
+
+        let net = adw::PreferencesGroup::builder()
+            .title("Network")
+            .description(format!(
                 "Live updates need speakers to reach this PC on TCP port {}. Without it, Sonance checks the speakers every second instead.",
                 sonos::events::EVENT_PORT
             ))
-            .wrap(true)
-            .xalign(0.0)
-            .css_classes(["dim-label", "caption"])
             .build();
-        let status = gtk::Label::builder()
-            .label(if self.live() { "Live updates: on" } else { "Live updates: off (polling)" })
-            .xalign(0.0)
-            .css_classes(["heading"])
-            .build();
-        let col = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        col.set_margin_top(12);
-        col.set_margin_start(18);
-        col.set_margin_end(18);
-        col.set_margin_bottom(18);
-        col.append(&list);
-        col.append(&status);
-        col.append(&note);
+        net.add(&widgets::row("Live updates", if self.live() { "On" } else { "Off: polling instead" }));
+        page.add(&net);
+
         let tv = adw::ToolbarView::new();
         tv.add_top_bar(&adw::HeaderBar::new());
-        tv.set_content(Some(&col));
-        let dialog = adw::Dialog::builder().title("Preferences").content_width(440).content_height(360).child(&tv).build();
+        tv.set_content(Some(&page));
+        let dialog = adw::Dialog::builder().title("Settings").content_width(520).content_height(620).child(&tv).build();
         super::glass::dialog(&dialog);
 
         let w = Rc::downgrade(self);
@@ -288,6 +300,104 @@ impl App {
                 }
             }
         });
+        let w = Rc::downgrade(self);
+        lyrics.connect_active_notify(move |r| {
+            if let Some(app) = w.upgrade() {
+                // The player's button saves it and redraws.
+                app.player.lyrics_btn.set_active(r.is_active());
+            }
+        });
+
+        let ui = Rc::new(IslandUi { row: island_row, button: island_btn, spinner, state: RefCell::new(island::State::Off) });
+        let u = ui.clone();
+        let w = Rc::downgrade(self);
+        ui.button.connect_clicked(move |_| {
+            let Some(app) = w.upgrade() else { return };
+            let on = matches!(*u.state.borrow(), island::State::On { outdated: false } | island::State::NeedsLogin);
+            u.busy(if on { "Turning off…" } else { "Turning on…" });
+            let u = u.clone();
+            let w = Rc::downgrade(&app);
+            spawn(async move { if on { island::turn_off().await } else { island::turn_on().await } }, move |r| {
+                let Some(app) = w.upgrade() else { return };
+                match r {
+                    Ok(state) => u.show(&island::Support::Supported { version: String::new() }, state),
+                    Err(e) => {
+                        app.toast(&format!("Couldn't change the top-bar island: {e:#}"));
+                        u.recheck();
+                    }
+                }
+            });
+        });
+        ui.recheck();
         dialog.present(Some(&self.window));
+    }
+}
+
+/// The island row in Settings.
+struct IslandUi {
+    row: adw::ActionRow,
+    button: gtk::Button,
+    spinner: adw::Spinner,
+    state: RefCell<island::State>,
+}
+
+impl IslandUi {
+    fn busy(&self, text: &str) {
+        self.row.set_subtitle(text);
+        self.button.set_sensitive(false);
+        self.spinner.set_visible(true);
+    }
+
+    fn recheck(self: &Rc<Self>) {
+        self.busy("Checking your system…");
+        let u = self.clone();
+        spawn(island::check(), move |(support, state)| u.show(&support, state));
+    }
+
+    fn show(&self, support: &island::Support, state: island::State) {
+        use island::{State, Support};
+        self.spinner.set_visible(false);
+        let blocked = match support {
+            Support::NotGnome(desktop) => Some(format!("Not available: the island is made for GNOME, and this desktop is {desktop}.")),
+            Support::Unsupported { version, supported } => Some(format!(
+                "Not available on GNOME {version}. It supports GNOME {}.",
+                supported.join(", ")
+            )),
+            _ => None,
+        };
+        if let Some(why) = blocked {
+            self.row.set_subtitle(&why);
+            self.button.set_label("Turn on");
+            self.button.set_sensitive(false);
+            *self.state.borrow_mut() = state;
+            return;
+        }
+        let extensions_off = matches!(support, Support::ExtensionsOff { .. });
+        let (text, label) = match &state {
+            State::On { outdated: false } => ("On".to_string(), "Turn off"),
+            State::On { outdated: true } => ("On, from an older version of Sonance".to_string(), "Update"),
+            State::NeedsLogin => ("Log out and back in to finish: GNOME loads top-bar extensions at login.".to_string(), "Turn off"),
+            State::Error(e) => (format!("Didn't start: {e}"), "Try again"),
+            State::Off if extensions_off => (
+                "Your system supports it, but GNOME's extensions are switched off. Turning the island on switches them back on (other extensions you have will run again too).".to_string(),
+                "Turn on",
+            ),
+            State::Off => {
+                let v = match support {
+                    Support::Supported { version } if !version.is_empty() => format!(" (GNOME {version})"),
+                    _ => String::new(),
+                };
+                (format!("Your system supports it{v}."), "Turn on")
+            }
+        };
+        self.row.set_subtitle(&text);
+        self.button.set_label(label);
+        self.button.set_sensitive(true);
+        self.button.remove_css_class("suggested-action");
+        self.button.remove_css_class("destructive-action");
+        if label != "Turn off" {
+            self.button.add_css_class("suggested-action");
+        }
+        *self.state.borrow_mut() = state;
     }
 }
