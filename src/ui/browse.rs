@@ -4,13 +4,11 @@ use std::rc::Rc;
 
 use super::widgets::{self, PlayHow};
 use super::{spawn, App};
-use crate::sonos::{self, Item, Member, Sonos};
+use crate::sonos::{self, Member, Sonos};
 use crate::spotify::{self, SpItem};
 
 pub struct BrowseView {
-    pub root: gtk::Box,
-    fav_list: gtk::ListBox,
-    fav_empty: adw::StatusPage,
+    pub root: gtk::Stack,
     sp_stack: gtk::Stack,
     client_id: adw::EntryRow,
     connect: gtk::Button,
@@ -24,16 +22,6 @@ pub struct BrowseView {
 
 impl BrowseView {
     pub fn new() -> Self {
-        let inner = adw::ViewStack::new();
-
-        // Favorites.
-        let fav_list = widgets::boxed_list();
-        let fav_empty = adw::StatusPage::builder().icon_name("starred-symbolic").title("No Sonos Favorites").description("Favorites you save in the Sonos app show up here.").build();
-        let fav_col = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        fav_col.append(&fav_list);
-        fav_col.append(&fav_empty);
-        inner.add_titled_with_icon(&widgets::page(&fav_col), Some("favorites"), "Sonos Favorites", "starred-symbolic");
-
         // Spotify: a login page and the search/library page.
         let client_id = adw::EntryRow::builder().title("Spotify Client ID").build();
         let id_list = widgets::boxed_list();
@@ -72,15 +60,10 @@ impl BrowseView {
         let sp_stack = gtk::Stack::new();
         sp_stack.add_named(&widgets::page(&login), Some("login"));
         sp_stack.add_named(&widgets::page(&sp_col), Some("main"));
-        inner.add_titled_with_icon(&sp_stack, Some("spotify"), "Spotify", "audio-x-generic-symbolic");
+        sp_stack.set_vexpand(true);
+        let root = sp_stack.clone();
 
-        let switcher = adw::InlineViewSwitcher::builder().stack(&inner).halign(gtk::Align::Center).margin_top(12).build();
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        root.append(&switcher);
-        root.append(&inner);
-        inner.set_vexpand(true);
-
-        Self { root, fav_list, fav_empty, sp_stack, client_id, connect, search, back, results, spinner, library: RefCell::default(), generation: Cell::new(0) }
+        Self { root, sp_stack, client_id, connect, search, back, results, spinner, library: RefCell::default(), generation: Cell::new(0) }
     }
 }
 
@@ -127,9 +110,10 @@ impl App {
 
         let w = Rc::downgrade(self);
         b.back.connect_clicked(move |_| {
+            // Back to whatever the search box shows: results, or the library.
             if let Some(app) = w.upgrade() {
-                app.browse.search.set_text("");
-                app.spotify_search(String::new());
+                let q = app.browse.search.text().trim().to_string();
+                app.spotify_search(q);
             }
         });
         self.update_spotify_page();
@@ -145,34 +129,6 @@ impl App {
     pub fn update_spotify_page(&self) {
         let page = if self.core.spotify.logged_in() { "main" } else { "login" };
         self.browse.sp_stack.set_visible_child_name(page);
-    }
-
-    pub(super) fn render_favorites(self: &Rc<Self>) {
-        let b = &self.browse;
-        b.fav_list.remove_all();
-        let favs = self.favorites.borrow().clone();
-        b.fav_empty.set_visible(favs.is_empty());
-        b.fav_list.set_visible(!favs.is_empty());
-        for f in favs {
-            if f.uri.is_empty() {
-                // Sonos Radio "shortcuts" only open inside the official app.
-                let row = { let r = widgets::row(&f.title, &format!("{} · opens only in the Sonos app", f.description)); r.set_sensitive(false); r };
-                let img = widgets::thumb(44);
-                row.add_prefix(&img);
-                self.load_art(f.art.clone(), &img);
-                b.fav_list.append(&row);
-                continue;
-            }
-            let queueable = !sonos::is_stream(&f.uri);
-            let fav: Item = f.clone();
-            let row = widgets::media_row(self, &f.title, &f.description, f.art.clone(), queueable, move |app, how| {
-                let Some(c) = app.coord() else { return };
-                app.toast(&play_msg(how, &fav.title));
-                let (sonos, uri, meta, container) = (app.core.sonos.clone(), fav.uri.clone(), fav.meta.clone(), fav.is_container());
-                app.act(play_item(sonos, c, uri, meta, container, how));
-            });
-            b.fav_list.append(&row);
-        }
     }
 
     pub fn spotify_login(self: &Rc<Self>, client_id: String) {
@@ -290,6 +246,95 @@ impl App {
         });
     }
 
+    /// An album's or playlist's songs; picking one plays the whole thing from there.
+    fn show_tracks(self: &Rc<Self>, list: SpItem) {
+        let b = &self.browse;
+        let generation_id = b.generation.get() + 1;
+        b.generation.set(generation_id);
+        b.spinner.set_visible(true);
+        b.back.set_visible(true);
+        let results = &b.results;
+        while let Some(c) = results.first_child() {
+            results.remove(&c);
+        }
+        let sp = self.core.spotify.clone();
+        let w = Rc::downgrade(self);
+        let (uri, art) = (list.uri.clone(), list.art.clone());
+        spawn(async move { sp.tracks_of(&uri, art).await }, move |r| {
+            let Some(app) = w.upgrade() else { return };
+            if app.browse.generation.get() != generation_id {
+                return;
+            }
+            app.browse.spinner.set_visible(false);
+            let (tracks, note) = match r {
+                Ok(t) => (t, None),
+                // Development-mode Spotify apps may only list playlists the user owns or edits.
+                Err(e) if e.to_string().contains("403") => (
+                    Vec::new(),
+                    Some("Spotify only lets Sonance list the songs of playlists you made or edit. Play still plays all of it."),
+                ),
+                Err(e) => {
+                    app.toast(&format!("{e:#}"));
+                    return;
+                }
+            };
+            let results = &app.browse.results;
+            let head = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+            head.set_margin_top(12);
+            let cover = widgets::thumb(120);
+            app.load_art(list.art.clone(), &cover);
+            let text = gtk::Box::new(gtk::Orientation::Vertical, 4);
+            text.set_valign(gtk::Align::Center);
+            text.set_hexpand(true);
+            let title = gtk::Label::builder().label(&list.title).xalign(0.0).wrap(true).css_classes(["title-2"]).build();
+            let count = if tracks.is_empty() { String::new() } else { format!(" · {} songs", tracks.len()) };
+            let sub = gtk::Label::builder().label(format!("{}{count}", list.subtitle)).xalign(0.0).wrap(true).css_classes(["dim-label"]).build();
+            let play = gtk::Button::builder().label("Play").css_classes(["suggested-action", "pill"]).halign(gtk::Align::Start).margin_top(8).build();
+            let all = list.clone();
+            let w2 = Rc::downgrade(&app);
+            play.connect_clicked(move |_| {
+                if let Some(app) = w2.upgrade() {
+                    app.play_spotify(&all, PlayHow::Now);
+                }
+            });
+            text.append(&title);
+            text.append(&sub);
+            text.append(&play);
+            head.append(&cover);
+            head.append(&text);
+            results.append(&head);
+            if let Some(note) = note {
+                results.append(&gtk::Label::builder().label(note).wrap(true).xalign(0.0).margin_top(18).css_classes(["dim-label"]).build());
+            }
+            let rows = widgets::boxed_list();
+            rows.set_margin_top(18);
+            rows.set_visible(!tracks.is_empty());
+            for (pos, t) in tracks {
+                let (ctx, track) = (list.clone(), t.clone());
+                let row = widgets::media_row(&app, &t.title, &t.subtitle, t.art.clone(), true, move |app, how| match how {
+                    PlayHow::Now => app.play_spotify_from(&ctx, pos, &track),
+                    _ => app.play_spotify(&track, how),
+                });
+                rows.append(&row);
+            }
+            results.append(&rows);
+        });
+    }
+
+    /// Plays an album or playlist starting at its song number `pos` (0-based).
+    fn play_spotify_from(self: &Rc<Self>, list: &SpItem, pos: u32, track: &SpItem) {
+        let Some(c) = self.coord() else { return };
+        let acc = self.spotify_acc.borrow().clone();
+        let Some((uri, meta)) = sonos::spotify_target(&acc, &list.uri, &list.title) else { return };
+        self.toast(&play_msg(PlayHow::Now, &track.title));
+        let sonos = self.core.sonos.clone();
+        self.act(async move {
+            sonos.clear_queue(&c.ip).await?;
+            sonos.enqueue(&c.ip, &uri, &meta, 0, false).await?;
+            sonos.play_from_queue(&c, pos + 1).await
+        });
+    }
+
     fn render_spotify(self: &Rc<Self>, sections: Vec<(String, Vec<SpItem>)>) {
         let results = &self.browse.results;
         while let Some(c) = results.first_child() {
@@ -318,9 +363,17 @@ impl App {
                         }
                     });
                     row
-                } else {
+                } else if it.kind() == "track" {
                     let item = it.clone();
                     widgets::media_row(self, &it.title, &it.subtitle, it.art.clone(), true, move |app, how| app.play_spotify(&item, how))
+                } else {
+                    // Albums and playlists open their songs; the menu still plays the whole thing.
+                    let item = it.clone();
+                    let list = it.clone();
+                    let open: Rc<dyn Fn(&Rc<App>)> = Rc::new(move |app: &Rc<App>| app.show_tracks(list.clone()));
+                    let row = widgets::media_row_opening(self, &it.title, &it.subtitle, it.art.clone(), true, move |app, how| app.play_spotify(&item, how), Some(open));
+                    row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+                    row
                 };
                 list.append(&row);
             }

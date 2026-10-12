@@ -10,12 +10,14 @@ account, no cloud, no official app needed.
   carousel on Now Playing: drag or swipe it to change songs.
 - **Rooms.** Every room and group, grouping and ungrouping, group volume, and
   per-room volume (hover the volume icon in the player).
-- **Queue.** Jump to, move, remove and clear tracks.
-- **Sonos Favorites.** Play now, play next or add to the queue.
-- **Spotify.** Search and browse your playlists and saved albums. Music plays
+- **Queue.** The list button in the player opens it: jump to, move, remove
+  and clear tracks.
+- **Spotify.** Search and browse your playlists and saved albums; open one to
+  see its songs and start it from any of them. Music plays
   through the Spotify account linked in your Sonos system, so the Sonos queue
   stays in charge.
-- **Alarms and sleep timer.**
+- **Alarms and sleep timer.** Alarms are behind the clock icon at the top
+  right.
 - **Top-bar island (GNOME 47–50).** Turn it on in **Menu → Settings**,
   which first checks that your desktop supports it. A Dynamic Island in the middle of the top bar:
   a small black pill with the cover and title. Click it to play or pause,
@@ -27,8 +29,9 @@ account, no cloud, no official app needed.
   this PC (click to move it to the speakers). Keyboard media keys are
   deliberately left alone: they keep controlling whatever else plays on the
   PC.
-- **Lyrics.** Synced lyrics under Now Playing and in the island, from
-  [LRCLIB](https://lrclib.net) (free, no account).
+- **Lyrics.** Synced lyrics beside the cover on Now Playing, scrolling along
+  with the song, and in the island, from [LRCLIB](https://lrclib.net) (free,
+  no account).
 - **Move Spotify from this PC to the speakers.** When the Spotify app plays
   on this PC, one click (the green button in the player, or the island)
   plays the same song on the speakers from the same point and pauses the
@@ -144,7 +147,8 @@ once in the official Sonos app). Sonance learns which account that is from any
 Spotify favorite, alarm or queue item. If Spotify playback fails on a fresh
 system, save one Spotify favorite in the Sonos app.
 
-Development-mode Spotify apps return at most 10 search results per type.
+Development-mode Spotify apps return at most 10 search results per type, and
+may only list the songs of playlists you made or edit (others still play).
 
 If you connected Spotify before moving playback from the PC existed, connect
 again once (Browse → Spotify) so Sonance may see which playlist the app is
@@ -211,7 +215,6 @@ microphone**, hold the phone at the spot, and press **Start** in Sonance.
 - Sonos switches to its Bluetooth input about 2.5 s after it first hears sound
   over it, so the very start of playback can be cut on Sonos speakers in
   Bluetooth mode.
-- Sonos Radio shortcuts in Favorites only open in the official app.
 - Speaker setup, Trueplay and adding music services still need the official
   app once.
 

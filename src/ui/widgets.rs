@@ -76,6 +76,19 @@ pub fn media_row(
     queueable: bool,
     on_play: impl Fn(&Rc<App>, PlayHow) + 'static,
 ) -> adw::ActionRow {
+    media_row_opening(app, title, subtitle, art, queueable, on_play, None)
+}
+
+/// Like [`media_row`], but a click runs `open` (e.g. show a playlist's songs) instead of playing.
+pub fn media_row_opening(
+    app: &Rc<App>,
+    title: &str,
+    subtitle: &str,
+    art: Option<String>,
+    queueable: bool,
+    on_play: impl Fn(&Rc<App>, PlayHow) + 'static,
+    open: Option<Rc<dyn Fn(&Rc<App>)>>,
+) -> adw::ActionRow {
     let row = { let r = row(title, subtitle); r.set_activatable(true); r };
     row.set_subtitle_lines(1);
     row.set_title_lines(1);
@@ -98,7 +111,10 @@ pub fn media_row(
     let w = Rc::downgrade(app);
     row.connect_activated(move |_| {
         if let Some(a) = w.upgrade() {
-            on_play(&a, PlayHow::Now)
+            match &open {
+                Some(open) => open(&a),
+                None => on_play(&a, PlayHow::Now),
+            }
         }
     });
     row

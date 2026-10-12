@@ -113,7 +113,7 @@ impl App {
         match ev.kind {
             Kind::Transport | Kind::GroupVolume => self.poll_status(),
             Kind::Queue => {
-                if self.stack.visible_child_name().as_deref() == Some("queue") {
+                if self.page() == "queue" {
                     self.refresh_queue(false);
                 }
                 self.refresh_cover();
@@ -131,7 +131,6 @@ impl App {
             }
             s.position = s.position.saturating_add(1).min(s.duration);
         }
-        self.extras.status_at.set(Some(std::time::Instant::now()));
         self.player.update(self);
         self.mpris_sync();
     }
@@ -263,10 +262,6 @@ impl App {
         bg_group.add(&login);
         page.add(&bg_group);
 
-        let now = adw::PreferencesGroup::builder().title("Now Playing").build();
-        let lyrics = adw::SwitchRow::builder().title("Lyrics").subtitle("Synced lyrics from LRCLIB, when it has them").active(self.player.lyrics_btn.is_active()).build();
-        now.add(&lyrics);
-        page.add(&now);
 
         let net = adw::PreferencesGroup::builder()
             .title("Network")
@@ -298,13 +293,6 @@ impl App {
                 if let Err(e) = set_autostart(r.is_active()) {
                     app.toast(&format!("Couldn't change start at login: {e}"));
                 }
-            }
-        });
-        let w = Rc::downgrade(self);
-        lyrics.connect_active_notify(move |r| {
-            if let Some(app) = w.upgrade() {
-                // The player's button saves it and redraws.
-                app.player.lyrics_btn.set_active(r.is_active());
             }
         });
 

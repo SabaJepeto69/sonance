@@ -36,10 +36,14 @@ pub struct Player {
     now_artist: gtk::Label,
     now_album: gtk::Label,
     art_url: RefCell<Option<String>>,
-    /// The line before the current one, the current one, the next.
-    pub lyrics_box: gtk::Box,
-    pub lyric_lines: Vec<gtk::Label>,
-    pub lyrics_btn: gtk::ToggleButton,
+    /// Every line of the song in a column that scrolls itself; hidden without lyrics.
+    pub lyrics_box: gtk::Overlay,
+    pub lyrics_scroll: gtk::ScrolledWindow,
+    pub lyrics_col: gtk::Box,
+    pub lyric_lines: RefCell<Vec<gtk::Label>>,
+    pub lyrics_anim: RefCell<Option<adw::TimedAnimation>>,
+    /// Shows the queue in place of the tabs.
+    pub queue_btn: gtk::ToggleButton,
     /// Shown while the Spotify app on this PC is playing.
     pub handoff: gtk::Button,
 }
@@ -114,7 +118,7 @@ impl Player {
         volume.set_tooltip_text(Some("Group volume"));
         let sleep_pop = gtk::Popover::new();
         let sleep = gtk::MenuButton::builder().icon_name("weather-clear-night-symbolic").tooltip_text("Sleep timer").css_classes(["flat"]).valign(gtk::Align::Center).popover(&sleep_pop).build();
-        let lyrics_btn = gtk::ToggleButton::builder().icon_name("media-view-subtitles-symbolic").tooltip_text("Lyrics").css_classes(["flat"]).valign(gtk::Align::Center).build();
+        let queue_btn = gtk::ToggleButton::builder().icon_name("view-list-symbolic").tooltip_text("Queue").css_classes(["flat"]).valign(gtk::Align::Center).build();
         let handoff = gtk::Button::builder()
             .icon_name("send-to-symbolic")
             .tooltip_text("Play this PC's Spotify on the speakers")
@@ -124,7 +128,7 @@ impl Player {
             .build();
         let end = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         end.append(&handoff);
-        end.append(&lyrics_btn);
+        end.append(&queue_btn);
         end.append(&mute);
         end.append(&volume);
         end.append(&sleep);
@@ -149,25 +153,42 @@ impl Player {
         info.append(&now_title);
         info.append(&now_artist);
         info.append(&now_album);
-        let lyrics_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        // Lyrics: the whole song in a column beside the cover, like Apple Music; the
+        // current line glides to a third of the way down and the edges fade into the black.
+        let lyrics_col = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        lyrics_col.set_margin_top(90);
+        lyrics_col.set_margin_bottom(420);
+        let lyrics_scroll = gtk::ScrolledWindow::builder()
+            .child(&lyrics_col)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::External)
+            .vexpand(true)
+            .can_target(false)
+            .build();
+        let lyrics_box = gtk::Overlay::new();
         lyrics_box.add_css_class("lyrics");
-        lyrics_box.set_margin_top(22);
         lyrics_box.set_visible(false);
-        let lyric_lines: Vec<gtk::Label> = (0..3)
-            .map(|i| {
-                let l = gtk::Label::builder().wrap(true).justify(gtk::Justification::Center).css_classes([if i == 1 { "lyric-current" } else { "lyric" }]).build();
-                lyrics_box.append(&l);
-                l
-            })
-            .collect();
-        info.append(&lyrics_box);
+        lyrics_box.set_hexpand(true);
+        lyrics_box.set_margin_top(24);
+        lyrics_box.set_margin_end(32);
+        // Clear of the floating player bar.
+        lyrics_box.set_margin_bottom(120);
+        lyrics_box.set_child(Some(&lyrics_scroll));
+        for (class, align) in [("lyrics-fade-top", gtk::Align::Start), ("lyrics-fade-bottom", gtk::Align::End)] {
+            let fade = gtk::Box::builder().css_classes([class]).valign(align).height_request(70).can_target(false).build();
+            lyrics_box.add_overlay(&fade);
+        }
         let clamp = adw::Clamp::builder().maximum_size(640).child(&info).margin_top(18).margin_bottom(130).margin_start(16).margin_end(16).build();
         let col = gtk::Box::new(gtk::Orientation::Vertical, 0);
         col.append(&cover.root);
         col.append(&clamp);
         let scroll = gtk::ScrolledWindow::builder().child(&col).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
+        scroll.set_hexpand(true);
+        let split = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).homogeneous(true).build();
+        split.append(&scroll);
+        split.append(&lyrics_box);
         let now_page = gtk::Overlay::new();
-        now_page.set_child(Some(&scroll));
+        now_page.set_child(Some(&split));
 
         Self {
             bar,
@@ -196,8 +217,11 @@ impl Player {
             now_album,
             art_url: RefCell::default(),
             lyrics_box,
-            lyric_lines,
-            lyrics_btn,
+            lyrics_scroll,
+            lyrics_col,
+            lyric_lines: RefCell::default(),
+            lyrics_anim: RefCell::default(),
+            queue_btn,
             handoff,
         }
     }

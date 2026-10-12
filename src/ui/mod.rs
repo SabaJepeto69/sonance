@@ -50,7 +50,11 @@ pub struct App {
     rooms: gtk::ListBox,
     room_label: gtk::Label,
     room_pop: gtk::Popover,
+    /// The tabs (Now Playing, Browse, Room).
     pub stack: adw::ViewStack,
+    /// The tabs, or the queue or alarms in front of them.
+    pages: gtk::Stack,
+    alarms_btn: gtk::ToggleButton,
     pub player: player::Player,
     pub queue: queue::QueueView,
     pub browse: browse::BrowseView,
@@ -188,16 +192,23 @@ impl App {
         let alarms = alarms::AlarmsView::new();
         let room = roomtab::RoomTab::new();
         stack.add_titled_with_icon(&player.now_page, Some("now"), "Now Playing", "audio-x-generic-symbolic");
-        stack.add_titled_with_icon(&queue.root, Some("queue"), "Queue", "view-list-symbolic");
         stack.add_titled_with_icon(&browse.root, Some("browse"), "Browse", "system-search-symbolic");
         stack.add_titled_with_icon(&room.root, Some("room"), "Room", "find-location-symbolic");
-        stack.add_titled_with_icon(&alarms.root, Some("alarms"), "Alarms", "alarm-symbolic");
+        // The queue and alarms open from buttons (player bar, top right) rather than tabs,
+        // in front of the tabs.
+        let pages = gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).transition_duration(180).build();
+        pages.add_named(&stack, Some("tabs"));
+        pages.add_named(&queue.root, Some("queue"));
+        pages.add_named(&alarms.root, Some("alarms"));
 
         let header = adw::HeaderBar::new();
         header.pack_start(&room_picker);
-        header.set_title_widget(Some(&adw::ViewSwitcher::builder().stack(&stack).policy(adw::ViewSwitcherPolicy::Wide).build()));
+        let switcher = adw::ViewSwitcher::builder().stack(&stack).policy(adw::ViewSwitcherPolicy::Wide).build();
+        header.set_title_widget(Some(&switcher));
         let menu_btn = gtk::MenuButton::builder().icon_name("open-menu-symbolic").tooltip_text("Menu").build();
         header.pack_end(&menu_btn);
+        let alarms_btn = gtk::ToggleButton::builder().icon_name("alarm-symbolic").tooltip_text("Alarms").build();
+        header.pack_end(&alarms_btn);
         let room_btn = gtk::Button::builder().icon_name("emblem-system-symbolic").tooltip_text("Room settings").build();
         header.pack_end(&room_btn);
 
@@ -205,7 +216,7 @@ impl App {
         content_view.add_top_bar(&header);
         // The player floats as a glass capsule over the pages.
         let stage = gtk::Overlay::new();
-        stage.set_child(Some(&stack));
+        stage.set_child(Some(&pages));
         stage.add_overlay(&player.bar);
         content_view.set_content(Some(&stage));
         let toasts = adw::ToastOverlay::new();
@@ -220,6 +231,8 @@ impl App {
             room_label,
             room_pop,
             stack,
+            pages,
+            alarms_btn,
             player,
             queue,
             browse,
@@ -285,6 +298,34 @@ impl App {
                 app.on_tab_changed();
             }
         });
+        let w = Rc::downgrade(&app);
+        app.pages.connect_visible_child_name_notify(move |_| {
+            if let Some(app) = w.upgrade() {
+                app.on_tab_changed();
+            }
+        });
+        // The queue and alarm buttons each bring their page forward; pressing again,
+        // or picking any tab, goes back to the tabs.
+        for (btn, name) in [(app.player.queue_btn.clone(), "queue"), (app.alarms_btn.clone(), "alarms")] {
+            let w = Rc::downgrade(&app);
+            btn.connect_toggled(move |b| {
+                let Some(app) = w.upgrade() else { return };
+                if b.is_active() {
+                    app.show_page(name);
+                } else if app.pages.visible_child_name().as_deref() == Some(name) {
+                    app.show_page("tabs");
+                }
+            });
+        }
+        let back = gtk::GestureClick::new();
+        back.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let w = Rc::downgrade(&app);
+        back.connect_pressed(move |_, _, _, _| {
+            if let Some(app) = w.upgrade() {
+                app.show_page("tabs");
+            }
+        });
+        switcher.add_controller(back);
 
         app.connect_player();
         app.connect_queue();
@@ -468,7 +509,7 @@ impl App {
             // With speakers calling back, a slow safety poll is enough and the
             // clock moves locally; without them, ask every second.
             let live = app.live();
-            if !live || t % 15 == 0 {
+            if !live || t % 15 == 0 || (app.wants_fast_poll() && t % 3 == 0) {
                 app.poll_status();
             } else {
                 app.advance_position();
@@ -476,12 +517,12 @@ impl App {
             if t % (if live { 30 } else { 5 }) == 0 {
                 app.refresh_topology();
                 app.refresh_sleep_timer();
-                if app.stack.visible_child_name().as_deref() == Some("now") {
+                if app.page() == "now" {
                     app.refresh_cover();
                 }
             }
             app.extras_tick(t);
-            if t % 2 == 0 && app.stack.visible_child_name().as_deref() == Some("queue") {
+            if t % 2 == 0 && app.page() == "queue" {
                 app.refresh_queue(false);
             }
             glib::ControlFlow::Continue
@@ -643,7 +684,7 @@ impl App {
         self.poll_status();
         // The queue belongs to the old group; reload it now only if it's on screen.
         self.queue.invalidate();
-        if self.stack.visible_child_name().as_deref() == Some("queue") {
+        if self.page() == "queue" {
             self.refresh_queue(true);
         }
         // Which speakers count as "playing" in the room view follows the selected group.
@@ -652,12 +693,27 @@ impl App {
         self.refresh_sleep_timer();
     }
 
+    /// What's on screen: "queue", "alarms", or the tab ("now", "browse", "room").
+    pub fn page(&self) -> String {
+        match self.pages.visible_child_name().as_deref() {
+            Some("tabs") | None => self.stack.visible_child_name().map(|n| n.to_string()).unwrap_or_default(),
+            Some(other) => other.to_string(),
+        }
+    }
+
+    /// Brings "queue" or "alarms" forward, or goes back to the "tabs".
+    pub fn show_page(&self, name: &str) {
+        self.pages.set_visible_child_name(name);
+        self.player.queue_btn.set_active(name == "queue");
+        self.alarms_btn.set_active(name == "alarms");
+    }
+
     fn on_tab_changed(self: &Rc<Self>) {
-        match self.stack.visible_child_name().as_deref() {
-            Some("queue") => self.refresh_queue(true),
-            Some("alarms") => self.refresh_alarms(),
-            Some("browse") => self.browse_shown(),
-            Some("room") => self.room_shown(),
+        match self.page().as_str() {
+            "queue" => self.refresh_queue(true),
+            "alarms" => self.refresh_alarms(),
+            "browse" => self.browse_shown(),
+            "room" => self.room_shown(),
             _ => {}
         }
     }
@@ -683,7 +739,6 @@ impl App {
                 if let Some(acc) = acc {
                     *app.spotify_acc.borrow_mut() = acc;
                 }
-                app.render_favorites();
             },
         );
     }
@@ -716,7 +771,7 @@ impl App {
                     let track_changed = s.track_no != old.track_no || s.title != old.title;
                     let cover_stale = track_changed || s.from_queue != old.from_queue || s.shuffle() != old.shuffle() || s.art != old.art;
                     *app.status.borrow_mut() = s;
-                    app.extras.status_at.set(Some(Instant::now()));
+                    app.sync_clock();
                     app.player.update(&app);
                     app.update_lyrics();
                     app.mpris_sync();

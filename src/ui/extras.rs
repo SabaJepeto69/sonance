@@ -22,8 +22,7 @@ pub struct LyricsState {
 #[derive(Default)]
 pub struct Extras {
     pub lyrics: std::cell::RefCell<LyricsState>,
-    /// When `status.position` was last true, so lyrics can move between seconds.
-    pub status_at: std::cell::Cell<Option<Instant>>,
+    clock: std::cell::RefCell<Option<Clock>>,
     local: std::cell::RefCell<Option<Local>>,
     handoff_at: std::cell::Cell<Option<Instant>>,
     /// Notices already shown, so each fires once.
@@ -49,20 +48,37 @@ pub fn rings_on(recurrence: &str, wday: u32) -> bool {
     }
 }
 
+/// The song's position, kept to a fraction of a second. Sonos reports whole
+/// seconds, so each reading only says the true position is somewhere in
+/// [p, p+1); the clock runs on its own and is nudged back inside that window
+/// whenever a reading disagrees, which pins it down within a few readings.
+#[derive(Clone)]
+struct Clock {
+    pos: f64,
+    at: Instant,
+    playing: bool,
+    /// Which song: a new one restarts the clock.
+    key: String,
+}
+
+impl Clock {
+    fn now(&self) -> f64 {
+        if self.playing { self.pos + self.at.elapsed().as_secs_f64() } else { self.pos }
+    }
+}
+
+/// Where the clock should be after reading `p` whole seconds.
+fn settle(predicted: Option<f64>, p: f64, playing: bool) -> f64 {
+    match predicted {
+        // Close: keep the smooth estimate, pulled just inside [p, p+1).
+        Some(pr) if pr >= p - 1.5 && pr <= p + 2.5 => pr.clamp(p, p + 0.98),
+        // A seek, a new song or a first reading: the middle of the window.
+        _ => p + if playing { 0.5 } else { 0.0 },
+    }
+}
+
 impl App {
     pub(super) fn connect_extras(self: &Rc<Self>) {
-        let hide = self.core.cfg.lock().unwrap().hide_lyrics;
-        self.player.lyrics_btn.set_active(!hide);
-        let w = Rc::downgrade(self);
-        self.player.lyrics_btn.connect_toggled(move |b| {
-            let Some(app) = w.upgrade() else { return };
-            {
-                let mut c = app.core.cfg.lock().unwrap();
-                c.hide_lyrics = !b.is_active();
-                c.save();
-            }
-            app.show_lyric_line(true);
-        });
         let w = Rc::downgrade(self);
         self.player.handoff.connect_clicked(move |_| {
             if let Some(app) = w.upgrade() {
@@ -71,7 +87,7 @@ impl App {
         });
         // Lyrics need finer steps than the once-a-second clock.
         let w = Rc::downgrade(self);
-        glib::timeout_add_local(Duration::from_millis(250), move || {
+        glib::timeout_add_local(Duration::from_millis(100), move || {
             let Some(app) = w.upgrade() else { return glib::ControlFlow::Break };
             app.show_lyric_line(false);
             glib::ControlFlow::Continue
@@ -91,6 +107,11 @@ impl App {
         }
     }
 
+    /// While lyrics are on screen, read the position often enough to keep them in step.
+    pub(super) fn wants_fast_poll(&self) -> bool {
+        self.extras.lyrics.borrow().lyrics.is_some() && self.status.borrow().state == PlayState::Playing
+    }
+
     pub(super) fn notice(&self, kind: &str, title: &str, body: &str, action: &str) {
         let Some(m) = self.mpris.borrow().clone() else { return };
         let (kind, title, body, action) = (kind.to_string(), title.to_string(), body.to_string(), action.to_string());
@@ -108,6 +129,21 @@ impl App {
 
     // ---- lyrics -------------------------------------------------------------
 
+    /// Feeds a fresh reading from the speaker into the song clock.
+    pub(super) fn sync_clock(&self) {
+        let s = self.status.borrow();
+        let key = format!("{}\n{}\n{}", s.track_no, s.title, s.artist);
+        let playing = s.state == PlayState::Playing;
+        let mut c = self.extras.clock.borrow_mut();
+        let predicted = c.as_ref().filter(|c| c.key == key).map(Clock::now);
+        let pos = settle(predicted, s.position as f64, playing);
+        *c = Some(Clock { pos, at: Instant::now(), playing, key });
+    }
+
+    fn song_position(&self) -> f32 {
+        self.extras.clock.borrow().as_ref().map_or(0.0, |c| c.now() as f32)
+    }
+
     /// Fetches lyrics when the song changed.
     pub(super) fn update_lyrics(self: &Rc<Self>) {
         let s = self.status.borrow().clone();
@@ -116,7 +152,7 @@ impl App {
             return;
         }
         *self.extras.lyrics.borrow_mut() = LyricsState { key: key.clone(), ..Default::default() };
-        self.show_lyric_line(true);
+        self.build_lyrics();
         if s.title.is_empty() || s.artist.is_empty() || sonos::is_stream(&s.title) {
             return;
         }
@@ -130,19 +166,39 @@ impl App {
             }
             st.lyrics = r.ok().flatten();
             drop(st);
-            app.show_lyric_line(true);
+            app.build_lyrics();
         });
     }
 
-    fn song_position(&self) -> f32 {
-        let s = self.status.borrow();
-        let mut pos = s.position as f32;
-        if s.state == PlayState::Playing {
-            if let Some(at) = self.extras.status_at.get() {
-                pos += at.elapsed().as_secs_f32().min(1.5);
+    /// One label per line of the song's lyrics (or none).
+    fn build_lyrics(&self) {
+        let p = &self.player;
+        while let Some(c) = p.lyrics_col.first_child() {
+            p.lyrics_col.remove(&c);
+        }
+        let mut labels = Vec::new();
+        if let Some(l) = &self.extras.lyrics.borrow().lyrics {
+            for (_, text) in &l.lines {
+                let label = gtk::Label::builder()
+                    .label(if text.is_empty() { "♪" } else { text.as_str() })
+                    .wrap(true)
+                    // Right-to-left lyrics (Hebrew, Arabic) hang from the right.
+                    .xalign(if gtk::pango::find_base_dir(text) == gtk::pango::Direction::Rtl { 1.0 } else { 0.0 })
+                    .justify(if gtk::pango::find_base_dir(text) == gtk::pango::Direction::Rtl { gtk::Justification::Right } else { gtk::Justification::Left })
+                    .css_classes(["lyric"])
+                    .build();
+                p.lyrics_col.append(&label);
+                labels.push(label);
             }
         }
-        pos
+        p.lyrics_box.set_visible(!labels.is_empty());
+        *p.lyric_lines.borrow_mut() = labels;
+        if let Some(a) = p.lyrics_anim.borrow_mut().take() {
+            a.skip();
+        }
+        p.lyrics_scroll.vadjustment().set_value(0.0);
+        self.extras.lyrics.borrow_mut().line = None;
+        self.show_lyric_line(true);
     }
 
     /// Moves the lyrics on to the line being sung; `force` redraws regardless.
@@ -153,25 +209,53 @@ impl App {
         if !force && line == st.line {
             return;
         }
+        let jumped = match (st.line, line) {
+            (Some(a), Some(b)) => b < a || b > a + 1,
+            _ => false,
+        };
         st.line = line;
-        let p = &self.player;
-        let show = st.lyrics.is_some() && p.lyrics_btn.is_active();
-        p.lyrics_box.set_visible(show);
-        p.lyrics_btn.set_sensitive(st.lyrics.is_some());
-        p.lyrics_btn.set_tooltip_text(Some(if st.lyrics.is_some() { "Lyrics" } else { "No lyrics for this song" }));
         let current = match (&st.lyrics, line) {
             (Some(l), Some(i)) => l.lines[i].1.clone(),
             _ => String::new(),
         };
-        if let Some(l) = &st.lyrics {
-            for (k, label) in p.lyric_lines.iter().enumerate() {
-                // Before the first line, show what's coming in the "next" slot.
-                let idx = line.map_or(k as isize - 2, |i| i as isize + k as isize - 1);
-                let text = usize::try_from(idx).ok().and_then(|i| l.lines.get(i)).map(|(_, t)| t.as_str()).unwrap_or("");
-                label.set_label(if k == 1 && text.is_empty() && line.is_some() { "♪" } else { text });
-            }
-        }
         drop(st);
+
+        let p = &self.player;
+        let labels = p.lyric_lines.borrow();
+        for (i, label) in labels.iter().enumerate() {
+            let (past, now) = match line {
+                Some(l) => (i < l, i == l),
+                None => (false, false),
+            };
+            if past { label.add_css_class("past") } else { label.remove_css_class("past") }
+            if now { label.add_css_class("current") } else { label.remove_css_class("current") }
+        }
+        // Glide the current line to a third of the way down; a seek jumps.
+        let target = line.and_then(|i| labels.get(i)).and_then(|label| {
+            let y = label.compute_point(&p.lyrics_col, &gtk::graphene::Point::zero())?.y() as f64;
+            Some(y + label.height() as f64 / 2.0 - p.lyrics_scroll.height() as f64 * 0.38)
+        });
+        let adj = p.lyrics_scroll.vadjustment();
+        let to = target.unwrap_or(0.0).clamp(0.0, (adj.upper() - adj.page_size()).max(0.0));
+        if let Some(a) = p.lyrics_anim.borrow_mut().take() {
+            a.pause();
+        }
+        if jumped || force || !self.window.is_visible() {
+            adj.set_value(to);
+        } else {
+            let a2 = adj.clone();
+            let anim = adw::TimedAnimation::builder()
+                .widget(&p.lyrics_scroll)
+                .value_from(adj.value())
+                .value_to(to)
+                .duration(650)
+                .easing(adw::Easing::EaseOutCubic)
+                .target(&adw::CallbackAnimationTarget::new(move |v| a2.set_value(v)))
+                .build();
+            anim.play();
+            *p.lyrics_anim.borrow_mut() = Some(anim);
+        }
+        drop(labels);
         if let Some(m) = self.mpris.borrow().clone() {
             crate::rt().spawn(async move {
                 let _ = m.set_lyric(&current).await;
@@ -325,7 +409,19 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::rings_on;
+    use super::{rings_on, settle};
+
+    #[test]
+    fn clock_settles_into_the_reading() {
+        // First reading: middle of the second.
+        assert_eq!(settle(None, 10.0, true), 10.5);
+        // Running a little ahead or behind: pulled just inside [p, p+1).
+        assert_eq!(settle(Some(12.3), 11.0, true), 11.98);
+        assert_eq!(settle(Some(10.7), 11.0, true), 11.0);
+        assert_eq!(settle(Some(11.4), 11.0, true), 11.4);
+        // A seek.
+        assert_eq!(settle(Some(40.0), 11.0, true), 11.5);
+    }
 
     #[test]
     fn recurrence() {

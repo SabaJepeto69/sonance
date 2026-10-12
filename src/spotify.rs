@@ -251,6 +251,43 @@ impl Spotify {
         Ok(v["albums"]["items"].as_array().map(|a| a.iter().filter_map(parse_item).collect()).unwrap_or_default())
     }
 
+    /// The songs of an album or playlist, in order. Album tracks carry no pictures,
+    /// so they get `art` (the album's).
+    /// Each comes with its position in the album or playlist.
+    pub async fn tracks_of(&self, uri: &str, art: Option<String>) -> Result<Vec<(u32, SpItem)>> {
+        let mut parts = uri.split(':').skip(1);
+        let (kind, id) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+        let (path, page) = match kind {
+            "album" => (format!("/albums/{id}/tracks"), 50),
+            "playlist" => (format!("/playlists/{id}/items"), 100),
+            _ => bail!("not an album or playlist"),
+        };
+        let mut out = Vec::new();
+        let mut offset = 0u32;
+        while offset < 2000 {
+            let v = self.get(&path, &[("limit", &page.to_string()), ("offset", &offset.to_string())]).await?;
+            let items = v["items"].as_array().cloned().unwrap_or_default();
+            for (i, it) in items.iter().enumerate() {
+                // Playlist entries wrap the track (as "item", formerly "track").
+                let t = if it["uri"].is_string() { it } else if it["item"].is_object() { &it["item"] } else { &it["track"] };
+                if let Some(mut s) = parse_item(t).filter(|s| s.kind() == "track") {
+                    if s.art.is_none() {
+                        s.art = art.clone();
+                    }
+                    if kind == "album" {
+                        s.subtitle = names(&t["artists"]);
+                    }
+                    out.push((offset + i as u32, s));
+                }
+            }
+            if items.len() < page || v["next"].is_null() {
+                break;
+            }
+            offset += page as u32;
+        }
+        Ok(out)
+    }
+
     pub async fn my_playlists(&self) -> Result<Vec<SpItem>> {
         let v = self.get("/me/playlists", &[("limit", "50")]).await?;
         Ok(v["items"].as_array().map(|a| a.iter().filter_map(parse_item).collect()).unwrap_or_default())
@@ -319,4 +356,35 @@ fn parse_item(v: &Value) -> Option<SpItem> {
         _ => return None,
     };
     Some(SpItem { uri, title, subtitle, art })
+}
+
+#[cfg(test)]
+mod live {
+    /// Uses the real sign-in from the config; restart a running Sonance afterwards, since a
+    /// token refresh here replaces the refresh token it holds.
+    #[tokio::test]
+    #[ignore = "network, real account"]
+    async fn lists_playlist_songs() {
+        let cfg = std::sync::Arc::new(std::sync::Mutex::new(crate::config::Config::load()));
+        let sp = super::Spotify::new(reqwest::Client::new(), cfg);
+        let pls = sp.my_playlists().await.unwrap();
+        // The first few may be empty or someone else's (which dev-mode apps can't list).
+        let mut found = None;
+        for pl in pls.iter().take(8) {
+            if let Ok(t) = sp.tracks_of(&pl.uri, pl.art.clone()).await {
+                if !t.is_empty() {
+                    found = Some((pl, t));
+                    break;
+                }
+            }
+        }
+        let (pl, tracks) = found.expect("a playlist with songs");
+        println!("{}: {} songs, first {:?}", pl.title, tracks.len(), tracks.first().map(|(i, t)| (i, &t.title, &t.subtitle)));
+        let albums = sp.my_albums().await.unwrap_or_default();
+        if let Some(al) = albums.first() {
+            let t = sp.tracks_of(&al.uri, al.art.clone()).await.unwrap();
+            println!("{}: {} songs, first {:?}", al.title, t.len(), t.first().map(|(i, t)| (i, &t.title, &t.subtitle, t.art.is_some())));
+        }
+        assert!(!tracks.is_empty());
+    }
 }
