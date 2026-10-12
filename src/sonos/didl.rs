@@ -18,6 +18,14 @@ pub struct Item {
 }
 
 impl Item {
+    /// `spotify:track:<id>` for a Spotify track (`x-sonos-spotify:spotify%3atrack%3a<id>?…`).
+    pub fn spotify_uri(&self) -> Option<String> {
+        let rest = self.uri.strip_prefix("x-sonos-spotify:")?;
+        let enc = rest.split('?').next()?;
+        let dec = urlencoding::decode(enc).ok()?;
+        dec.starts_with("spotify:track:").then(|| dec.into_owned())
+    }
+
     pub fn is_container(&self) -> bool {
         self.uri.starts_with("x-rincon-cpcontainer:")
             || self.meta.contains("object.container")

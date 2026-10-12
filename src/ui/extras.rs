@@ -182,9 +182,7 @@ impl App {
                 let label = gtk::Label::builder()
                     .label(if text.is_empty() { "♪" } else { text.as_str() })
                     .wrap(true)
-                    // Right-to-left lyrics (Hebrew, Arabic) hang from the right.
-                    .xalign(if gtk::pango::find_base_dir(text) == gtk::pango::Direction::Rtl { 1.0 } else { 0.0 })
-                    .justify(if gtk::pango::find_base_dir(text) == gtk::pango::Direction::Rtl { gtk::Justification::Right } else { gtk::Justification::Left })
+                    .justify(gtk::Justification::Center)
                     .css_classes(["lyric"])
                     .build();
                 p.lyrics_col.append(&label);
@@ -230,10 +228,10 @@ impl App {
             if past { label.add_css_class("past") } else { label.remove_css_class("past") }
             if now { label.add_css_class("current") } else { label.remove_css_class("current") }
         }
-        // Glide the current line to a third of the way down; a seek jumps.
+        // Glide the current line to the middle; a seek jumps.
         let target = line.and_then(|i| labels.get(i)).and_then(|label| {
             let y = label.compute_point(&p.lyrics_col, &gtk::graphene::Point::zero())?.y() as f64;
-            Some(y + label.height() as f64 / 2.0 - p.lyrics_scroll.height() as f64 * 0.38)
+            Some(y + label.height() as f64 / 2.0 - p.lyrics_scroll.height() as f64 * 0.5)
         });
         let adj = p.lyrics_scroll.vadjustment();
         let to = target.unwrap_or(0.0).clamp(0.0, (adj.upper() - adj.page_size()).max(0.0));

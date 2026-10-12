@@ -461,6 +461,18 @@ impl Sonos {
         }
     }
 
+    /// The songs of a music-service album or playlist, as Sonos's own link to the
+    /// service sees them (it can read playlists a Spotify developer app can't). Sonos
+    /// expands the container into a temporary Sonos playlist, which is read and
+    /// deleted again; the queue is never touched.
+    pub async fn expand(&self, ip: &str, uri: &str, meta: &str) -> Result<Vec<Item>> {
+        let r = self.av(ip, "CreateSavedQueue", &[("Title", "Sonance (temporary)"), ("EnqueuedURI", uri), ("EnqueuedURIMetaData", meta)]).await?;
+        let sq = tag(&r, "AssignedObjectID").filter(|s| s.starts_with("SQ:")).ok_or_else(|| anyhow::anyhow!("Sonos didn't open the list"))?;
+        let items = self.browse(ip, &sq).await;
+        let _ = self.soap.call(ip, Svc::ContentDirectory, "DestroyObject", &[("ObjectID", &sq)]).await;
+        items
+    }
+
     /// `count` queue items from 0-based `start`, in one request.
     pub async fn queue_slice(&self, coord_ip: &str, start: u32, count: u32) -> Result<Vec<Item>> {
         let r = self

@@ -29,7 +29,7 @@ account, no cloud, no official app needed.
   this PC (click to move it to the speakers). Keyboard media keys are
   deliberately left alone: they keep controlling whatever else plays on the
   PC.
-- **Lyrics.** Synced lyrics beside the cover on Now Playing, scrolling along
+- **Lyrics.** Synced lyrics under the song on Now Playing, scrolling along
   with the song, and in the island, from [LRCLIB](https://lrclib.net) (free,
   no account).
 - **Move Spotify from this PC to the speakers.** When the Spotify app plays
@@ -148,7 +148,8 @@ Spotify favorite, alarm or queue item. If Spotify playback fails on a fresh
 system, save one Spotify favorite in the Sonos app.
 
 Development-mode Spotify apps return at most 10 search results per type, and
-may only list the songs of playlists you made or edit (others still play).
+may only list the songs of playlists you made or edit; Sonance lists other
+people's playlists through your Sonos system's own Spotify link instead.
 
 If you connected Spotify before moving playback from the PC existed, connect
 again once (Browse → Spotify) so Sonance may see which playlist the app is

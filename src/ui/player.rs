@@ -153,42 +153,35 @@ impl Player {
         info.append(&now_title);
         info.append(&now_artist);
         info.append(&now_album);
-        // Lyrics: the whole song in a column beside the cover, like Apple Music; the
-        // current line glides to a third of the way down and the edges fade into the black.
+        // Lyrics, under the song's title: the whole song in a short window that scrolls
+        // itself, the current line gliding to the middle and the edges fading into the black.
         let lyrics_col = gtk::Box::new(gtk::Orientation::Vertical, 16);
-        lyrics_col.set_margin_top(90);
-        lyrics_col.set_margin_bottom(420);
+        lyrics_col.set_margin_top(120);
+        lyrics_col.set_margin_bottom(120);
         let lyrics_scroll = gtk::ScrolledWindow::builder()
             .child(&lyrics_col)
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vscrollbar_policy(gtk::PolicyType::External)
-            .vexpand(true)
+            .height_request(230)
             .can_target(false)
             .build();
         let lyrics_box = gtk::Overlay::new();
         lyrics_box.add_css_class("lyrics");
         lyrics_box.set_visible(false);
-        lyrics_box.set_hexpand(true);
-        lyrics_box.set_margin_top(24);
-        lyrics_box.set_margin_end(32);
-        // Clear of the floating player bar.
-        lyrics_box.set_margin_bottom(120);
+        lyrics_box.set_margin_top(18);
         lyrics_box.set_child(Some(&lyrics_scroll));
         for (class, align) in [("lyrics-fade-top", gtk::Align::Start), ("lyrics-fade-bottom", gtk::Align::End)] {
-            let fade = gtk::Box::builder().css_classes([class]).valign(align).height_request(70).can_target(false).build();
+            let fade = gtk::Box::builder().css_classes([class]).valign(align).height_request(60).can_target(false).build();
             lyrics_box.add_overlay(&fade);
         }
         let clamp = adw::Clamp::builder().maximum_size(640).child(&info).margin_top(18).margin_bottom(130).margin_start(16).margin_end(16).build();
+        info.append(&lyrics_box);
         let col = gtk::Box::new(gtk::Orientation::Vertical, 0);
         col.append(&cover.root);
         col.append(&clamp);
         let scroll = gtk::ScrolledWindow::builder().child(&col).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
-        scroll.set_hexpand(true);
-        let split = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).homogeneous(true).build();
-        split.append(&scroll);
-        split.append(&lyrics_box);
         let now_page = gtk::Overlay::new();
-        now_page.set_child(Some(&split));
+        now_page.set_child(Some(&scroll));
 
         Self {
             bar,

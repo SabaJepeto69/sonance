@@ -260,7 +260,29 @@ impl App {
         let sp = self.core.spotify.clone();
         let w = Rc::downgrade(self);
         let (uri, art) = (list.uri.clone(), list.art.clone());
-        spawn(async move { sp.tracks_of(&uri, art).await }, move |r| {
+        // Sonos's own Spotify link, for lists the Spotify developer app may not read.
+        let via_sonos = self.coord().zip(sonos::spotify_target(&self.spotify_acc.borrow(), &list.uri, &list.title));
+        let sonos = self.core.sonos.clone();
+        spawn(
+            async move {
+                match sp.tracks_of(&uri, art).await {
+                    Ok(t) => Ok(t),
+                    Err(e) => {
+                        let Some((c, (target, meta))) = via_sonos else { return Err(e) };
+                        let items = sonos.expand(&c.ip, &target, &meta).await.map_err(|_| e)?;
+                        Ok(items
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, it)| {
+                                let uri = it.spotify_uri().unwrap_or(it.uri);
+                                let subtitle = if it.album.is_empty() { it.artist } else { format!("{} · {}", it.artist, it.album) };
+                                (i as u32, SpItem { uri, title: it.title, subtitle, art: it.art })
+                            })
+                            .collect())
+                    }
+                }
+            },
+            move |r: anyhow::Result<Vec<(u32, SpItem)>>| {
             let Some(app) = w.upgrade() else { return };
             if app.browse.generation.get() != generation_id {
                 return;
@@ -268,11 +290,7 @@ impl App {
             app.browse.spinner.set_visible(false);
             let (tracks, note) = match r {
                 Ok(t) => (t, None),
-                // Development-mode Spotify apps may only list playlists the user owns or edits.
-                Err(e) if e.to_string().contains("403") => (
-                    Vec::new(),
-                    Some("Spotify only lets Sonance list the songs of playlists you made or edit. Play still plays all of it."),
-                ),
+                Err(e) if e.to_string().contains("403") => (Vec::new(), Some("Couldn't list this playlist's songs. Play still plays all of it.")),
                 Err(e) => {
                     app.toast(&format!("{e:#}"));
                     return;
