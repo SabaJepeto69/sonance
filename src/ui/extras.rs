@@ -23,6 +23,8 @@ pub struct LyricsState {
 pub struct Extras {
     pub lyrics: std::cell::RefCell<LyricsState>,
     clock: std::cell::RefCell<Option<Clock>>,
+    /// Lines were just rebuilt; position them after the next layout.
+    lyrics_dirty: std::cell::Cell<bool>,
     local: std::cell::RefCell<Option<Local>>,
     handoff_at: std::cell::Cell<Option<Instant>>,
     /// Notices already shown, so each fires once.
@@ -87,9 +89,13 @@ impl App {
         });
         // Lyrics need finer steps than the once-a-second clock.
         let w = Rc::downgrade(self);
+        let last_height = std::cell::Cell::new(0);
         glib::timeout_add_local(Duration::from_millis(100), move || {
             let Some(app) = w.upgrade() else { return glib::ControlFlow::Break };
-            app.show_lyric_line(false);
+            // New lines or a resized window: place the current line again once laid out.
+            let h = app.player.lyrics_scroll.height();
+            let relayout = app.extras.lyrics_dirty.take() || h != last_height.replace(h);
+            app.show_lyric_line(relayout);
             glib::ControlFlow::Continue
         });
     }
@@ -197,6 +203,7 @@ impl App {
         p.lyrics_scroll.vadjustment().set_value(0.0);
         self.extras.lyrics.borrow_mut().line = None;
         self.show_lyric_line(true);
+        self.extras.lyrics_dirty.set(true);
     }
 
     /// Moves the lyrics on to the line being sung; `force` redraws regardless.
@@ -229,11 +236,13 @@ impl App {
             if now { label.add_css_class("current") } else { label.remove_css_class("current") }
         }
         // Glide the current line to the middle; a seek jumps.
+        // Positions are taken in the window's own coordinates plus how far it has
+        // scrolled, so the column's margins count.
+        let adj = p.lyrics_scroll.vadjustment();
         let target = line.and_then(|i| labels.get(i)).and_then(|label| {
-            let y = label.compute_point(&p.lyrics_col, &gtk::graphene::Point::zero())?.y() as f64;
+            let y = label.compute_point(&p.lyrics_scroll, &gtk::graphene::Point::zero())?.y() as f64 + adj.value();
             Some(y + label.height() as f64 / 2.0 - p.lyrics_scroll.height() as f64 * 0.5)
         });
-        let adj = p.lyrics_scroll.vadjustment();
         let to = target.unwrap_or(0.0).clamp(0.0, (adj.upper() - adj.page_size()).max(0.0));
         if let Some(a) = p.lyrics_anim.borrow_mut().take() {
             a.pause();
