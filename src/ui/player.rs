@@ -318,7 +318,7 @@ impl App {
             let Some(c) = app.coord() else { return };
             let s = app.status.borrow().clone();
             let sonos = app.core.sonos.clone();
-            if s.from_queue && !s.shuffle() {
+            if s.from_queue {
                 app.act(async move { sonos.play_from_queue(&c, to as u32).await });
             } else {
                 app.act(async move {
@@ -543,12 +543,9 @@ impl App {
             cover.set_items(pos, HashMap::from([(pos, current)]), false, false);
             return;
         }
+        // With shuffle on, Sonos reorders the queue itself, so the queue's neighbours are
+        // still the songs that play before and after.
         let center = s.track_no as i64;
-        if s.shuffle() {
-            // Sonos keeps the shuffled order to itself; skipping still works.
-            cover.set_items(center, HashMap::from([(center, current)]), true, true);
-            return;
-        }
         let Some(c) = self.coord() else { return };
         let sonos = self.core.sonos.clone();
         let w = Rc::downgrade(self);
