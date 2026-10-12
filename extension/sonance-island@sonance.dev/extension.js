@@ -356,15 +356,21 @@ export default class SonanceIslandExtension extends Extension {
     }
 
     /* Geometry, centred on the top bar of the primary monitor. */
+    /* Geometry: centred on the primary monitor, vertically in the top bar. The monitor,
+     * not the panel, gives the centre: the panel's transformed position is stale or zero
+     * while it is unmapped or mid-allocation (at login, around fullscreen and the lock
+     * screen), and themes may give it uneven margins. */
     _geometry(mode) {
-        const [px, py] = Main.panel.get_transformed_position();
-        const [pw, ph] = Main.panel.get_transformed_size();
+        const mon = Main.layoutManager.primaryMonitor;
+        const ph = Main.panel.height > 0 ? Main.panel.height : 32;
         const bar = Math.max(24, ph - 6);
         const width = SIZES[mode].width;
         let height = SIZES[mode].height ?? bar;
         if (mode === 'expanded')
             height = Math.ceil(this._full.get_preferred_height(width)[1]);
-        return {x: Math.round(px + (pw - width) / 2), y: Math.round(py + (ph - bar) / 2), width, height};
+        const x = mon ? mon.x + (mon.width - width) / 2 : 0;
+        const y = (mon ? mon.y : 0) + (ph - bar) / 2;
+        return {x: Math.round(x), y: Math.round(y), width, height};
     }
 
     _place(animate) {
